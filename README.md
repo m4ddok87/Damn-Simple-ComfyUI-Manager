@@ -22,6 +22,8 @@ The distributed application is intended to be a ready-to-use portable executable
 
 ## First Run
 
+<img src="screenshots/first_star.png" alt="First Start of the software" width="800">
+
 1. Put the portable executable inside its own folder.
 2. Start the application from that folder.
 3. On first launch, the app may create local files and subfolders next to the executable for its configuration, tools, and support data.
@@ -48,6 +50,8 @@ Available actions include:
 - Install Triton.
 - Install Ultralytics.
 - Delete the instance from disk while keeping its backups.
+
+<img src="screenshots/instances.png" alt="Installed Instacnes section" width="800">
 
 ## Start Modes
 
@@ -83,6 +87,8 @@ The New Installation section downloads ComfyUI portable packages from GitHub.
 
 The app installs ComfyUI into a subfolder of the selected Work Folder. It does not install directly into the Work Folder root.
 
+<img src="screenshots/installation.png" alt="New Installation section" width="800">
+
 ## Backup
 
 The Backup section lists backups stored inside the selected Work Folder.
@@ -93,6 +99,8 @@ Backups are compressed files containing selected instance data only. The availab
 - `subgraphs`
 - `custom_nodes`
 - `extra_model_paths.yaml`
+
+<img src="screenshots/backup.png" alt="Backup section" width="800">
 
 A backup can include all of these items or only some of them.
 
