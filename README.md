@@ -22,14 +22,14 @@ The distributed application is intended to be a ready-to-use portable executable
 
 ## First Run
 
-<img src="screenshots/first_star.png" alt="First Start of the software" width="800">
-
 1. Put the portable executable inside its own folder.
 2. Start the application from that folder.
 3. On first launch, the app may create local files and subfolders next to the executable for its configuration, tools, and support data.
 4. Select or create a Work Folder.
 5. The app creates local configuration and support folders inside that Work Folder.
 6. The main interface becomes available after the Work Folder is selected.
+
+<img src="screenshots/first_star.png" alt="First Start of the software" width="800">
 
 Each Work Folder has its own instances, settings, backups, browser cache, and shared model folder. This makes it possible to keep different ComfyUI environments separated from each other.
 
