@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Local virtual environments
+.venv/
+venv/
+env/
+
+# Local app/build data
+.portable/
+_temp/
+_tools/
+release/
+checkpoint/
+git/
+*.log
+*_state.json
+
+# Browser helper build output
+browser/bin/
+browser/obj/
+
+# User/work-folder data
+browser_cache/
+backup/
+common_models_folder/
+*_config.json
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/
+
