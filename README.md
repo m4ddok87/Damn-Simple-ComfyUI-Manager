@@ -111,3 +111,9 @@ This allows several ComfyUI instances to use a shared model library without dupl
 ## Notes
 
 Damn Simple ComfyUI Manager is focused on local portable use. It is meant to keep ComfyUI instance management practical, compact, and easy to understand while still allowing separate work folders, separate instance settings, and dedicated per-instance browser sessions.
+
+## License
+
+Damn Simple ComfyUI Manager is released under the GNU General Public License v3.0.
+
+Copyright (c) 2026 maddok.
