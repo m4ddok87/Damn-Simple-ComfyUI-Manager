@@ -6,7 +6,7 @@ It is designed for users who want to install, organize, launch, back up, freeze,
 
 The distributed application is intended to be a ready-to-use portable executable.
 
-<script type="text/javascript" src="https://cdnjs.buymeacoffee.com/1.0.0/button.prod.min.js" data-name="bmc-button" data-slug="maddok" data-color="#BD5FFF" data-emoji="🍦"  data-font="Cookie" data-text="Buy me a gelato" data-outline-color="#000000" data-font-color="#ffffff" data-coffee-color="#FFDD00" ></script>
+<a href="https://www.buymeacoffee.com/maddok" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-violet.png" alt="Buy Me a Coffee" style="height: 60px !important;width: 217px !important;" ></a>
 
 If you think it's appropriate, if you liked my idea, if it was useful to you, buy me a gelato!
 
