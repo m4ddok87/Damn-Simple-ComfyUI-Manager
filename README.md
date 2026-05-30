@@ -6,6 +6,10 @@ It is designed for users who want to install, organize, launch, back up, freeze,
 
 The distributed application is intended to be a ready-to-use portable executable.
 
+<script type="text/javascript" src="https://cdnjs.buymeacoffee.com/1.0.0/button.prod.min.js" data-name="bmc-button" data-slug="maddok" data-color="#BD5FFF" data-emoji="🍦"  data-font="Cookie" data-text="Buy me a gelato" data-outline-color="#000000" data-font-color="#ffffff" data-coffee-color="#FFDD00" ></script>
+
+If you think it's appropriate, if you liked my idea, if it was useful to you, buy me a gelato!
+
 ## Main Features
 
 - Manage existing ComfyUI portable instances.
