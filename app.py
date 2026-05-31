@@ -11,6 +11,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import webbrowser
 import zipfile
 import ctypes
 from ctypes import wintypes
@@ -23,6 +24,7 @@ import customtkinter as ctk
 
 
 APP_NAME = "Damn Simple ComfyUI Manager"
+PROJECT_REPOSITORY_URL = "https://github.com/m4ddok87/Damn-Simple-ComfyUI-Manager"
 DEFAULT_INSTANCE_PREFIX = "ComfyUI"
 BACKUP_ITEMS = [
     ("workflows", "folder"),
@@ -225,6 +227,8 @@ class App(ctk.CTk):
         self.worker_messages: queue.Queue[str] = queue.Queue()
         self.install_in_progress = False
         self.dedicated_window_active = False
+        self.disk_usage_request_id = 0
+        self.disk_usage_cache: dict[str, dict[str, int]] = {}
 
         self.grid_columnconfigure(0, weight=1)
         self.grid_rowconfigure(0, weight=0)
@@ -450,12 +454,14 @@ class App(ctk.CTk):
         self._close_dropdown_popup()
 
     def _build_manage_tab(self, parent: ctk.CTkFrame) -> None:
-        parent.grid_columnconfigure(0, weight=1)
-        parent.grid_columnconfigure(1, weight=2)
+        parent.grid_columnconfigure(0, weight=0, minsize=380)
+        parent.grid_columnconfigure(1, weight=1)
         parent.grid_rowconfigure(0, weight=1)
 
         left = ctk.CTkFrame(parent, corner_radius=12)
         left.grid(row=0, column=0, sticky="nsew", padx=(12, 8), pady=12)
+        left.configure(width=380)
+        left.grid_propagate(False)
         left.grid_rowconfigure(1, weight=1)
         left.grid_columnconfigure(0, weight=1)
 
@@ -562,7 +568,7 @@ class App(ctk.CTk):
         )
         mode_frame = ctk.CTkFrame(start_row, fg_color="transparent")
         mode_frame.grid(row=0, column=3, sticky="e", padx=(12, 0))
-        self.start_mode_controls: dict[str, tuple[ctk.CTkCanvas, ctk.CTkLabel]] = {}
+        self.start_mode_controls: dict[str, tuple[ctk.CTkLabel, ctk.CTkLabel]] = {}
         self._build_start_mode_option(mode_frame, "Browser", 0)
         self._build_start_mode_option(mode_frame, "Dedicated", 1)
         self._refresh_start_mode_controls()
@@ -584,18 +590,21 @@ class App(ctk.CTk):
             lambda: self._choose_update_bat(),
             column=1,
         )
-
-        tools = ctk.CTkFrame(right, fg_color="transparent")
-        tools.grid(row=5, column=0, sticky="ew", padx=20, pady=(6, 8))
-        tools.grid_columnconfigure((0, 1), weight=1)
         self.freeze_instance_button = ctk.CTkButton(
-            tools,
+            update_row,
             text="Freeze Instance",
+            width=150,
             command=self._freeze_selected_instance,
             fg_color=("#6d5dfc", "#7a5cff"),
             hover_color=("#5b4bd4", "#674ce0"),
         )
-        self.freeze_instance_button.grid(row=1, column=0, sticky="ew", padx=(0, 6), pady=4)
+        self.freeze_instance_button.grid(row=0, column=3, sticky="ew", padx=(10, 0))
+
+        tools = ctk.CTkFrame(right, fg_color="transparent")
+        tools.grid(row=5, column=0, sticky="ew", padx=20, pady=(6, 8))
+        tools.grid_columnconfigure(0, weight=0, minsize=255)
+        tools.grid_columnconfigure(1, weight=1)
+        tools.grid_rowconfigure((1, 2, 3), weight=1)
         self.comfyui_manager_button = ctk.CTkButton(
             tools,
             text="Install ComfyUI Manager",
@@ -603,7 +612,7 @@ class App(ctk.CTk):
             fg_color=("gray62", "gray32"),
             hover_color=("gray55", "gray40"),
         )
-        self.comfyui_manager_button.grid(row=1, column=1, sticky="ew", padx=(6, 0), pady=4)
+        self.comfyui_manager_button.grid(row=1, column=0, sticky="ew", padx=(0, 6), pady=4)
         ctk.CTkButton(
             tools,
             text="Update .yaml to Common Model Folder",
@@ -626,7 +635,7 @@ class App(ctk.CTk):
             fg_color=("gray62", "gray32"),
             hover_color=("gray55", "gray40"),
         )
-        self.install_triton_button.grid(row=2, column=0, columnspan=2, sticky="ew", padx=0, pady=4)
+        self.install_triton_button.grid(row=2, column=0, sticky="ew", padx=(0, 6), pady=4)
         self.install_ultralytics_button = ctk.CTkButton(
             tools,
             text="Install Ultralytics",
@@ -634,7 +643,17 @@ class App(ctk.CTk):
             fg_color=("gray62", "gray32"),
             hover_color=("gray55", "gray40"),
         )
-        self.install_ultralytics_button.grid(row=3, column=0, columnspan=2, sticky="ew", padx=0, pady=4)
+        self.install_ultralytics_button.grid(row=3, column=0, sticky="ew", padx=(0, 6), pady=4)
+
+        self.disk_usage_canvas = ctk.CTkCanvas(
+            tools,
+            height=118,
+            highlightthickness=0,
+            bd=0,
+        )
+        self.disk_usage_canvas.grid(row=1, column=1, rowspan=3, sticky="nsew", padx=(6, 0), pady=4)
+        self.disk_usage_canvas.bind("<Configure>", lambda _event: self._refresh_disk_usage_graph(self.selected_instance, start_worker=False))
+        self._draw_empty_disk_usage_graph()
 
         self.detail_box = ctk.CTkTextbox(right, height=260, corner_radius=10)
         self.detail_box.grid(row=6, column=0, sticky="nsew", padx=20, pady=(12, 20))
@@ -798,15 +817,18 @@ class App(ctk.CTk):
         panel.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             panel,
-            text="by maddok",
+            text="maddok, 2026",
             font=ctk.CTkFont(size=22, weight="bold"),
         ).grid(row=0, column=0, sticky="", padx=24, pady=(0, 8))
-        ctk.CTkLabel(
+        repo_link = ctk.CTkLabel(
             panel,
-            text="2026",
-            font=ctk.CTkFont(size=18),
-            text_color=("gray35", "gray72"),
-        ).grid(row=1, column=0, sticky="", padx=24, pady=(0, 0))
+            text=PROJECT_REPOSITORY_URL,
+            font=ctk.CTkFont(size=14),
+            text_color=("#2563eb", "#60a5fa"),
+            cursor="hand2",
+        )
+        repo_link.grid(row=1, column=0, sticky="", padx=24, pady=(0, 0))
+        repo_link.bind("<Button-1>", lambda _event: webbrowser.open(PROJECT_REPOSITORY_URL))
 
     def _open_work_folder_picker(self) -> None:
         if not self.app_state.work_folders:
@@ -949,7 +971,7 @@ class App(ctk.CTk):
         entry.insert(0, text)
         entry.configure(state="disabled")
         entry.grid(row=0, column=column, sticky="ew", padx=(0, 8))
-        button = ctk.CTkButton(parent, text="v", width=42)
+        button = ctk.CTkButton(parent, text="▼", width=42, text_color="#ffffff", font=ctk.CTkFont(size=13, weight="bold"))
         button.configure(command=lambda: self._toggle_dropdown_from_button(button, command))
         button.grid(row=0, column=column + 1)
         return entry
@@ -964,7 +986,7 @@ class App(ctk.CTk):
     def _build_start_mode_option(self, parent: ctk.CTkFrame, label: str, column: int) -> None:
         option = ctk.CTkFrame(parent, fg_color="transparent", cursor="hand2")
         option.grid(row=0, column=column, padx=(0, 10) if column == 0 else (0, 0))
-        indicator = ctk.CTkCanvas(option, width=22, height=22, highlightthickness=0, bd=0)
+        indicator = ctk.CTkLabel(option, text="○", width=22, font=ctk.CTkFont(family="Segoe UI Symbol", size=24, weight="bold"), cursor="hand2")
         indicator.grid(row=0, column=0, padx=(0, 5))
         text_label = ctk.CTkLabel(option, text=label, cursor="hand2")
         text_label.grid(row=0, column=1)
@@ -977,17 +999,15 @@ class App(ctk.CTk):
         if not hasattr(self, "start_mode_controls"):
             return
         selected = self.start_mode_var.get()
-        for label, (canvas, _text_label) in self.start_mode_controls.items():
-            canvas.delete("all")
+        for label, (indicator, _text_label) in self.start_mode_controls.items():
             is_selected = label == selected or (label == "Browser" and selected == "Normal")
             is_dark = ctk.get_appearance_mode().lower() == "dark"
             fill = "#3b82f6" if is_dark else "#2563eb"
             outline = fill if is_selected else ("#ffffff" if is_dark else "#374151")
-            canvas.configure(bg=self._canvas_bg_color())
             if is_selected:
-                canvas.create_oval(1, 1, 21, 21, fill=fill, outline=fill, width=2)
+                indicator.configure(text="●", text_color=fill)
             else:
-                canvas.create_oval(2, 2, 20, 20, fill=self._canvas_bg_color(), outline=outline, width=3)
+                indicator.configure(text="○", text_color=outline)
 
     @staticmethod
     def _canvas_bg_color() -> str:
@@ -1038,7 +1058,7 @@ class App(ctk.CTk):
         self.dropdown_popup = None
         if self.dropdown_toggle_button is not None:
             try:
-                self.dropdown_toggle_button.configure(text="v")
+                self.dropdown_toggle_button.configure(text="▼")
             except tk.TclError:
                 pass
         self.dropdown_toggle_button = None
@@ -1052,10 +1072,10 @@ class App(ctk.CTk):
         open_command()
         if self.dropdown_popup is not None and self.dropdown_popup.winfo_exists():
             self.dropdown_toggle_button = button
-            button.configure(text="^")
+            button.configure(text="▲")
         else:
             self.dropdown_toggle_button = None
-            button.configure(text="v")
+            button.configure(text="▼")
 
     def _close_dropdown_on_outside_click(self, event: tk.Event) -> None:
         if self.dropdown_popup is None or not self.dropdown_popup.winfo_exists():
@@ -1197,6 +1217,7 @@ class App(ctk.CTk):
         self._set_detail_text(
             f"Status: {status}\n"
             f"Created/registered: {created}\n"
+            f"Disk Usage: calculating...\n"
             f"Backup: {backup_text}\n"
             f"Triton: {triton_status}\n"
             f"Ultralytics: {ultralytics_status}\n"
@@ -1206,6 +1227,412 @@ class App(ctk.CTk):
             f"Internal model paths:\n{internal_text}\n\n"
             f"Notes:\n{instance.notes or 'No notes.'}"
         )
+        cached_usage = self.disk_usage_cache.get(self._disk_usage_cache_key(instance))
+        if cached_usage:
+            self._set_detail_disk_usage(self._format_disk_usage_detail(cached_usage["instance_bytes"]))
+        self._refresh_disk_usage_graph(instance)
+
+    def _refresh_disk_usage_graph(self, instance: ComfyInstance | None, start_worker: bool = True) -> None:
+        if not hasattr(self, "disk_usage_canvas"):
+            return
+        if instance is None:
+            self._draw_empty_disk_usage_graph()
+            return
+        cache_key = self._disk_usage_cache_key(instance)
+        cached_usage = self.disk_usage_cache.get(cache_key)
+        if cached_usage:
+            self._draw_disk_usage_from_snapshot(cached_usage)
+        else:
+            self._draw_empty_disk_usage_graph("Calculating disk usage...")
+        if not start_worker:
+            return
+        self.disk_usage_request_id += 1
+        request_id = self.disk_usage_request_id
+        threading.Thread(
+            target=self._calculate_disk_usage_worker,
+            args=(request_id, instance, cache_key),
+            daemon=True,
+        ).start()
+
+    def _calculate_disk_usage_worker(self, request_id: int, instance: ComfyInstance, cache_key: str) -> None:
+        snapshot = self._calculate_disk_usage_snapshot(instance)
+        self.after(0, lambda: self._apply_disk_usage_snapshot(request_id, instance.path, cache_key, snapshot))
+
+    def _calculate_disk_usage_snapshot(self, instance: ComfyInstance) -> dict[str, int] | None:
+        folder = Path(instance.path)
+        instance_bytes = self._folder_size_bytes(folder)
+        if instance_bytes is None:
+            return None
+        try:
+            usage = shutil.disk_usage(folder)
+        except OSError:
+            return None
+        common_bytes = 0
+        common_status = self._common_model_status(instance)
+        if common_status["connected"]:
+            common_folder = self._ensure_common_models_folder()
+            if common_folder is not None:
+                common_size = self._folder_size_bytes(common_folder)
+                if common_size is not None:
+                    common_bytes = common_size
+        other_instances_bytes = self._other_instances_size_bytes(instance)
+        work_folder_total_bytes = 0
+        work_folder_residual_bytes = 0
+        if self.config.work_folder is not None:
+            work_size = self._folder_size_bytes(self.config.work_folder)
+            if work_size is not None:
+                work_folder_total_bytes = work_size
+                work_folder_residual_bytes = max(work_size - instance_bytes - other_instances_bytes - common_bytes, 0)
+        other_used = max(usage.used - work_folder_total_bytes, 0)
+        return {
+            "instance_bytes": instance_bytes,
+            "other_instances_bytes": other_instances_bytes,
+            "common_bytes": common_bytes,
+            "work_folder_residual_bytes": work_folder_residual_bytes,
+            "work_folder_total_bytes": work_folder_total_bytes,
+            "other_used": other_used,
+            "free_bytes": usage.free,
+            "total_bytes": usage.total,
+        }
+
+    def _apply_disk_usage_snapshot(
+        self,
+        request_id: int,
+        instance_path: str,
+        cache_key: str,
+        snapshot: dict[str, int] | None,
+    ) -> None:
+        if request_id != self.disk_usage_request_id:
+            return
+        if self.selected_instance is None or self.selected_instance.path != instance_path:
+            return
+        if snapshot is None:
+            self._draw_empty_disk_usage_graph("Disk usage not available")
+            self._set_detail_disk_usage("not available")
+            return
+        self.disk_usage_cache[cache_key] = snapshot
+        self._set_detail_disk_usage(self._format_disk_usage_detail(snapshot["instance_bytes"]))
+        self._draw_disk_usage_from_snapshot(snapshot)
+
+    def _draw_disk_usage_from_snapshot(self, snapshot: dict[str, int]) -> None:
+        self._draw_disk_usage_graph(
+            snapshot["instance_bytes"],
+            snapshot["other_instances_bytes"],
+            snapshot["common_bytes"],
+            snapshot["work_folder_residual_bytes"],
+            snapshot["work_folder_total_bytes"],
+            snapshot["other_used"],
+            snapshot["free_bytes"],
+            snapshot["total_bytes"],
+        )
+
+    def _set_detail_disk_usage(self, value: str) -> None:
+        if not hasattr(self, "detail_box"):
+            return
+        self.detail_box.configure(state="normal")
+        text = self.detail_box.get("1.0", "end-1c")
+        text = re.sub(r"^Disk Usage: .*$", f"Disk Usage: {value}", text, count=1, flags=re.MULTILINE)
+        self.detail_box.delete("1.0", "end")
+        self.detail_box.insert("1.0", text)
+        self.detail_box.configure(state="disabled")
+
+    def _disk_usage_cache_key(self, instance: ComfyInstance) -> str:
+        try:
+            return str(Path(instance.path).resolve()).casefold()
+        except OSError:
+            return str(Path(instance.path)).casefold()
+
+    @staticmethod
+    def _format_disk_usage_detail(size_bytes: int) -> str:
+        return f"{size_bytes / (1024 * 1024):,.1f} MB"
+
+    def _other_instances_size_bytes(self, selected_instance: ComfyInstance) -> int:
+        selected_path = Path(selected_instance.path)
+        try:
+            selected_resolved = selected_path.resolve()
+        except OSError:
+            selected_resolved = selected_path
+        selected_key = str(selected_resolved).casefold()
+        total = 0
+        seen_paths: set[str] = set()
+        for instance in self.config.instances:
+            folder = Path(instance.path)
+            try:
+                resolved = folder.resolve()
+            except OSError:
+                resolved = folder
+            resolved_key = str(resolved).casefold()
+            if resolved_key == selected_key or resolved_key in seen_paths:
+                continue
+            seen_paths.add(resolved_key)
+            size = self._folder_size_bytes(folder)
+            if size is not None:
+                total += size
+        return total
+
+    def _draw_empty_disk_usage_graph(self, message: str = "Select an instance") -> None:
+        if not hasattr(self, "disk_usage_canvas"):
+            return
+        canvas = self.disk_usage_canvas
+        canvas.delete("all")
+        canvas.configure(bg=self._canvas_bg_color())
+        width = max(canvas.winfo_width(), 260)
+        height = max(canvas.winfo_height(), 78)
+        text_color = "#ffffff" if ctk.get_appearance_mode().lower() == "dark" else "#374151"
+        canvas.create_text(width / 2, height / 2, text=message, fill=text_color, font=("Segoe UI", 9))
+
+    def _draw_disk_usage_graph(
+        self,
+        instance_bytes: int,
+        other_instances_bytes: int,
+        common_bytes: int,
+        work_folder_residual_bytes: int,
+        work_folder_total_bytes: int,
+        other_bytes: int,
+        free_bytes: int,
+        total_bytes: int,
+    ) -> None:
+        canvas = self.disk_usage_canvas
+        canvas.delete("all")
+        is_dark = ctk.get_appearance_mode().lower() == "dark"
+        bg = self._canvas_bg_color()
+        canvas.configure(bg=bg)
+        width = max(canvas.winfo_width(), 260)
+        height = max(canvas.winfo_height(), 118)
+        pad_x = 14
+        bar_height = 14
+        radius = bar_height // 2
+        bar_y = max(52, (height - bar_height) // 2 + 4)
+        bar_width = max(width - pad_x * 2, 1)
+        total = max(total_bytes, 1)
+
+        free_color = "#ffffff" if is_dark else "#f8fafc"
+        other_color = "#a3a3a3" if is_dark else "#c7cbd1"
+        instance_color = "#3b82f6"
+        other_instances_color = "#38bdf8"
+        common_color = "#facc15"
+        work_folder_color = "#a855f7"
+        outline = "#4b5563" if is_dark else "#9ca3af"
+        label_color = "#ffffff" if is_dark else "#111827"
+        muted_label = "#e5e7eb" if is_dark else "#4b5563"
+        guide_color = "#ffffff" if is_dark else "#6b7280"
+        canvas.create_text(
+            width - pad_x,
+            3,
+            text="Disk Usage",
+            anchor="ne",
+            fill=label_color,
+            font=("Segoe UI", 8, "bold"),
+        )
+
+        used_segments = [
+            {"name": "Instance", "label": "Instance", "bytes": instance_bytes, "color": instance_color, "minimum": radius * 2},
+            {"name": "Other Instances", "label": "Other Instances", "bytes": other_instances_bytes, "color": other_instances_color, "minimum": radius * 2},
+            {"name": "Common Model Folder", "label": "Common Model Folder", "bytes": common_bytes, "color": common_color, "minimum": radius * 2},
+            {
+                "name": "Work Folder",
+                "label": "Work Folder",
+                "bytes": work_folder_residual_bytes,
+                "display_bytes": work_folder_total_bytes,
+                "color": work_folder_color,
+                "minimum": radius * 2,
+            },
+            {"name": "Other", "label": "Other", "bytes": other_bytes, "color": muted_label, "minimum": 0},
+        ]
+        visible_segments = [segment for segment in used_segments if int(segment["bytes"]) > 0]
+        for segment in visible_segments:
+            segment["width"] = self._segment_width(int(segment["bytes"]), total, bar_width)
+            if int(segment["minimum"]) > 0:
+                segment["width"] = max(int(segment["width"]), int(segment["minimum"]))
+        used_width = sum(int(segment["width"]) for segment in visible_segments)
+        if used_width > bar_width:
+            overflow = used_width - bar_width
+            for segment in reversed(visible_segments):
+                minimum = int(segment["minimum"])
+                current = int(segment["width"])
+                reduction = min(overflow, max(current - minimum, 0))
+                if reduction:
+                    segment["width"] = current - reduction
+                    overflow -= reduction
+                if overflow <= 0:
+                    break
+        free_width = max(bar_width - sum(int(segment["width"]) for segment in visible_segments), 0)
+        if free_width == 0 and free_bytes > 0:
+            free_width = 1
+            for segment in reversed(visible_segments):
+                minimum = int(segment["minimum"])
+                current = int(segment["width"])
+                if current > minimum:
+                    segment["width"] = current - 1
+                    break
+
+        x0 = pad_x
+        x_end = pad_x + bar_width
+        self._draw_rounded_bar(canvas, x0, bar_y, x_end, bar_y + bar_height, radius, free_color, outline)
+        cursor = x0
+        for index, segment in enumerate(visible_segments):
+            segment_width = int(segment["width"])
+            next_cursor = cursor + segment_width
+            segment["start"] = cursor
+            segment["end"] = next_cursor
+            draw_start = cursor if index == 0 else cursor - 1
+            if index == 0:
+                self._draw_left_rounded_segment(canvas, cursor, bar_y, next_cursor, bar_y + bar_height, radius, str(segment["color"]))
+            else:
+                canvas.create_rectangle(draw_start, bar_y, next_cursor, bar_y + bar_height, fill=str(segment["color"]), outline="")
+            cursor = next_cursor
+        self._draw_rounded_outline(canvas, x0, bar_y, x_end, bar_y + bar_height, radius, outline)
+
+        label_sides = {
+            "Instance": "top",
+            "Common Model Folder": "top",
+            "Other": "top",
+            "Other Instances": "bottom",
+            "Work Folder": "bottom",
+        }
+        label_items = []
+        for segment in visible_segments:
+            side = label_sides.get(str(segment["name"]))
+            if side is None:
+                continue
+            segment_x = (float(segment["start"]) + float(segment["end"])) / 2
+            label_items.append({"segment": segment, "side": side, "target_x": segment_x})
+
+        for side, label_y, min_gap in (("top", 19, 88), ("bottom", height - 23, 96)):
+            side_items = [item for item in label_items if item["side"] == side]
+            for item, label_x in self._spread_disk_label_positions(side_items, x0, x_end, min_gap):
+                segment = item["segment"]
+                segment_x = float(item["target_x"])
+                if side == "top":
+                    bar_anchor_y = bar_y - 3
+                    elbow_y = bar_y - 12
+                    label_anchor_y = label_y + 18
+                else:
+                    bar_anchor_y = bar_y + bar_height + 3
+                    elbow_y = bar_y + bar_height + 10
+                    label_anchor_y = label_y - 11
+                canvas.create_line(
+                    segment_x,
+                    bar_anchor_y,
+                    segment_x,
+                    elbow_y,
+                    label_x,
+                    elbow_y,
+                    label_x,
+                    label_anchor_y,
+                    fill=guide_color,
+                    width=1,
+                )
+                available_width = 112 if segment["name"] == "Common Model Folder" else 86
+                label_name = self._wrap_disk_label(str(segment["label"]), available_width)
+                label_text = f"{label_name}\n{self._format_storage_size(int(segment.get('display_bytes', segment['bytes'])))}"
+                canvas.create_text(
+                    label_x,
+                    label_y,
+                    text=label_text,
+                    anchor="center",
+                    fill=str(segment["color"]),
+                    font=("Segoe UI", 7),
+                )
+
+        free_pct = free_bytes / total * 100
+        percent_y = bar_y + bar_height + 8
+        canvas.create_text(x_end, percent_y, text=f"{free_pct:.1f}% free", anchor="e", fill=label_color, font=("Segoe UI", 7, "bold"))
+
+    @staticmethod
+    def _wrap_disk_label(label: str, max_width_px: int) -> str:
+        if len(label) * 4 <= max_width_px:
+            return label
+        max_chars = max(8, max_width_px // 4)
+        lines: list[str] = []
+        current = ""
+        for word in label.split():
+            candidate = f"{current} {word}".strip()
+            if current and len(candidate) > max_chars:
+                lines.append(current)
+                current = word
+            else:
+                current = candidate
+        if current:
+            lines.append(current)
+        return "\n".join(lines)
+
+    @staticmethod
+    def _spread_disk_label_positions(items: list[dict[str, object]], x0: float, x1: float, min_gap: int) -> list[tuple[dict[str, object], float]]:
+        if not items:
+            return []
+        margin = 36
+        ordered = sorted(items, key=lambda item: float(item["target_x"]))
+        positions = [min(max(float(item["target_x"]), x0 + margin), x1 - margin) for item in ordered]
+        for index in range(1, len(positions)):
+            positions[index] = max(positions[index], positions[index - 1] + min_gap)
+        overflow = positions[-1] - (x1 - margin)
+        if overflow > 0:
+            positions = [position - overflow for position in positions]
+        for index in range(len(positions) - 2, -1, -1):
+            positions[index] = min(positions[index], positions[index + 1] - min_gap)
+        underflow = (x0 + margin) - positions[0]
+        if underflow > 0:
+            positions = [position + underflow for position in positions]
+        return list(zip(ordered, positions))
+
+    @staticmethod
+    def _segment_width(size_bytes: int, total_bytes: int, bar_width: int) -> int:
+        if size_bytes <= 0:
+            return 0
+        width = int(round(size_bytes / max(total_bytes, 1) * bar_width))
+        return max(width, 2)
+
+    @staticmethod
+    def _format_storage_size(size_bytes: int) -> str:
+        gib = size_bytes / (1024 ** 3)
+        if gib >= 1:
+            return f"{gib:,.1f} GB"
+        return f"{size_bytes / (1024 ** 2):,.1f} MB"
+
+    @staticmethod
+    def _draw_rounded_bar(canvas: tk.Canvas, x0: float, y0: float, x1: float, y1: float, radius: int, fill: str, outline: str) -> None:
+        canvas.create_rectangle(x0 + radius, y0, x1 - radius, y1, fill=fill, outline="")
+        canvas.create_oval(x0, y0, x0 + radius * 2, y1, fill=fill, outline="")
+        canvas.create_oval(x1 - radius * 2, y0, x1, y1, fill=fill, outline="")
+        App._draw_rounded_outline(canvas, x0, y0, x1, y1, radius, outline)
+
+    @staticmethod
+    def _draw_rounded_outline(canvas: tk.Canvas, x0: float, y0: float, x1: float, y1: float, radius: int, outline: str) -> None:
+        canvas.create_line(x0 + radius, y0, x1 - radius, y0, fill=outline)
+        canvas.create_line(x0 + radius, y1, x1 - radius, y1, fill=outline)
+        canvas.create_arc(x0, y0, x0 + radius * 2, y1, start=90, extent=180, outline=outline, style="arc")
+        canvas.create_arc(x1 - radius * 2, y0, x1, y1, start=-90, extent=180, outline=outline, style="arc")
+
+    @staticmethod
+    def _draw_left_rounded_segment(canvas: tk.Canvas, x0: float, y0: float, x1: float, y1: float, radius: int, fill: str) -> None:
+        if x1 <= x0:
+            return
+        canvas.create_rectangle(x0 + radius, y0, x1, y1, fill=fill, outline="")
+        canvas.create_oval(x0, y0, x0 + radius * 2, y1, fill=fill, outline="")
+        canvas.create_rectangle(x0 + radius, y0, x1, y1, fill=fill, outline="")
+
+    @staticmethod
+    def _folder_size_bytes(folder: Path) -> int | None:
+        if not folder.exists() or not folder.is_dir():
+            return None
+        total = 0
+        stack = [folder]
+        while stack:
+            current = stack.pop()
+            try:
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                stack.append(Path(entry.path))
+                            elif entry.is_file(follow_symlinks=False):
+                                total += entry.stat(follow_symlinks=False).st_size
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+        return total
 
     def _refresh_instance_action_fields(self, instance: ComfyInstance) -> None:
         settings = self._get_instance_settings(instance)

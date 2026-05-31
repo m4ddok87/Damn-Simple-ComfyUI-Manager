@@ -53,6 +53,7 @@ Available actions include:
 - Connect or disconnect `extra_model_paths.yaml` from the common model folder.
 - Install Triton.
 - Install Ultralytics.
+- View a graphical disk usage summary for the selected instance, other instances, the Work Folder, and the shared common model folder when connected.
 - Delete the instance from disk while keeping its backups.
 
 <img src="screenshots/instances.png" alt="Installed Instacnes section" width="800">
