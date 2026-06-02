@@ -61,6 +61,7 @@ COMMON_MODEL_SUBFOLDERS = [
     "models/latent_upscale_models",
 ]
 GITHUB_RELEASES_API = "https://api.github.com/repos/comfyanonymous/ComfyUI/releases?per_page=50"
+PORTABLE_GIT_RELEASE_API = "https://api.github.com/repos/git-for-windows/git/releases/latest"
 FALLBACK_RELEASE = "latest"
 FALLBACK_ASSETS = {
     "ComfyUI_windows_portable_amd.7z": "https://github.com/comfyanonymous/ComfyUI/releases/latest/download/ComfyUI_windows_portable_amd.7z",
@@ -79,6 +80,8 @@ os.environ["TMPDIR"] = str(LOCAL_TEMP_DIR)
 ASSET_ROOT = Path(getattr(sys, "_MEIPASS", APP_ROOT)) / "assets"
 BUNDLED_SEVEN_ZIP_PATH = ASSET_ROOT / "7zr.exe"
 LOCAL_SEVEN_ZIP_PATH = APP_ROOT / "_tools" / "7zr.exe"
+LOCAL_GIT_ROOT = APP_ROOT / "_tools" / "git"
+LOCAL_TOOL_DOWNLOADS = APP_ROOT / "_tools" / "downloads"
 
 
 @dataclass
@@ -195,6 +198,10 @@ class AppState:
         self.save()
 
 
+class InstallationCancelled(Exception):
+    pass
+
+
 class App(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
@@ -226,6 +233,10 @@ class App(ctk.CTk):
         self.release_assets: dict[str, dict[str, str]] = {}
         self.worker_messages: queue.Queue[str] = queue.Queue()
         self.install_in_progress = False
+        self.install_cancel_requested = threading.Event()
+        self.current_install_destination: Path | None = None
+        self.install_locked_control_states: dict[tk.Misc, str] = {}
+        self.dropdown_field_buttons: dict[ctk.CTkEntry, ctk.CTkButton] = {}
         self.dedicated_window_active = False
         self.disk_usage_request_id = 0
         self.disk_usage_cache: dict[str, dict[str, int]] = {}
@@ -240,6 +251,7 @@ class App(ctk.CTk):
             self._build_first_run()
         self.bind("<Button-1>", self._close_dropdown_on_outside_click, add="+")
         self.bind("<Escape>", lambda _event: self._close_dropdown_popup(), add="+")
+        self.protocol("WM_DELETE_WINDOW", self._on_main_window_close)
         self.after(150, self._drain_worker_messages)
 
     def _apply_icon(self) -> None:
@@ -248,6 +260,12 @@ class App(ctk.CTk):
                 self.iconbitmap(str(ICON_PATH))
             except Exception:
                 pass
+
+    def _on_main_window_close(self) -> None:
+        if self.install_in_progress:
+            self.bell()
+            return
+        self.destroy()
 
     def _ensure_dedicated_browser_helper(self) -> None:
         if not getattr(sys, "frozen", False):
@@ -269,7 +287,7 @@ class App(ctk.CTk):
         try:
             self._enable_windows_dark_app_mode()
             self.update_idletasks()
-            self._apply_titlebar_theme_to_hwnd(self.winfo_id())
+            self._apply_titlebar_theme_to_hwnd(self._native_window_handle(self))
         except Exception:
             pass
 
@@ -426,17 +444,22 @@ class App(ctk.CTk):
             text_color=("gray35", "gray72"),
         )
         self.work_folder_label.grid(row=0, column=1, sticky="ew", padx=(0, 12))
-        ctk.CTkButton(bar, text="Open another Work Folder", width=190, command=self._open_work_folder_picker).grid(
-            row=0, column=2, padx=(0, 8)
+        self.open_work_folder_button = ctk.CTkButton(
+            bar,
+            text="Open another Work Folder",
+            width=190,
+            command=self._open_work_folder_picker,
         )
-        ctk.CTkButton(
+        self.open_work_folder_button.grid(row=0, column=2, padx=(0, 8))
+        self.create_work_folder_button = ctk.CTkButton(
             bar,
             text="Create New",
             width=128,
             command=self._create_new_work_folder,
             fg_color=("#7c3aed", "#a855f7"),
             hover_color=("#6d28d9", "#9333ea"),
-        ).grid(row=0, column=3)
+        )
+        self.create_work_folder_button.grid(row=0, column=3)
 
     def _build_tabs(self) -> None:
         self.tabs = ctk.CTkTabview(self, corner_radius=14, command=self._on_tab_changed)
@@ -697,15 +720,27 @@ class App(ctk.CTk):
         self.source_url.grid(row=3, column=1, sticky="ew", padx=18, pady=8)
         self.source_url.configure(state="disabled")
 
+        install_actions = ctk.CTkFrame(panel, fg_color="transparent")
+        install_actions.grid(row=4, column=1, sticky="e", padx=18, pady=(12, 18))
+        self.cancel_install_button = ctk.CTkButton(
+            install_actions,
+            text="Cancel installation",
+            command=self._request_cancel_installation,
+            height=42,
+            fg_color=("#dc2626", "#ef4444"),
+            hover_color=("#b91c1c", "#dc2626"),
+        )
+        self.cancel_install_button.grid(row=0, column=0, padx=(0, 10))
+        self.cancel_install_button.grid_remove()
         self.install_button = ctk.CTkButton(
-            panel,
+            install_actions,
             text="Download and prepare instance",
             command=self._start_install,
             height=42,
             fg_color=("#2563eb", "#7c3aed"),
             hover_color=("#1d4ed8", "#6d28d9"),
         )
-        self.install_button.grid(row=4, column=1, sticky="e", padx=18, pady=(12, 18))
+        self.install_button.grid(row=0, column=1)
 
         log_panel = ctk.CTkFrame(parent, corner_radius=12)
         log_panel.grid(row=1, column=0, sticky="nsew", padx=12, pady=(8, 12))
@@ -837,11 +872,7 @@ class App(ctk.CTk):
         if not self._ask_confirm("Open Work Folder", "Open another existing work folder?"):
             return
 
-        picker = ctk.CTkToplevel(self)
-        picker.title("Open Work Folder")
-        self._center_window(picker, 620, 360)
-        picker.transient(self)
-        picker.grab_set()
+        picker = self._make_modal("Open Work Folder", 620, 360)
         picker.grid_columnconfigure(0, weight=1)
         picker.grid_rowconfigure(1, weight=1)
 
@@ -974,6 +1005,7 @@ class App(ctk.CTk):
         button = ctk.CTkButton(parent, text="▼", width=42, text_color="#ffffff", font=ctk.CTkFont(size=13, weight="bold"))
         button.configure(command=lambda: self._toggle_dropdown_from_button(button, command))
         button.grid(row=0, column=column + 1)
+        self.dropdown_field_buttons[entry] = button
         return entry
 
     @staticmethod
@@ -1878,7 +1910,7 @@ class App(ctk.CTk):
         else:
             command = [str(bat_path)]
         flags = subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0
-        return subprocess.Popen(command, cwd=str(cwd), creationflags=flags)
+        return subprocess.Popen(command, cwd=str(cwd), creationflags=flags, env=self._subprocess_env_with_local_git())
 
     def _prepare_dedicated_launch_bat(self, instance: ComfyInstance, source_bat: Path) -> Path:
         self._assert_inside_work_folder(source_bat)
@@ -2269,12 +2301,16 @@ class App(ctk.CTk):
         comfy_root = self._resolve_comfy_root(Path(instance.path))
         if not (comfy_root / ".git").exists():
             return ""
+        git_executable = self._git_executable()
+        if git_executable is None:
+            return ""
         try:
             result = subprocess.run(
-                ["git", "-C", str(comfy_root), "describe", "--tags", "--abbrev=0"],
+                [str(git_executable), "-C", str(comfy_root), "describe", "--tags", "--abbrev=0"],
                 capture_output=True,
                 text=True,
                 timeout=8,
+                env=self._subprocess_env_with_local_git(),
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
         except (OSError, subprocess.SubprocessError):
@@ -2282,6 +2318,152 @@ class App(ctk.CTk):
         if result.returncode != 0:
             return ""
         return result.stdout.strip()
+
+    def _git_executable(self) -> Path | None:
+        local_git = self._local_git_executable()
+        if local_git is not None:
+            return local_git
+        system_git = shutil.which("git")
+        return Path(system_git) if system_git else None
+
+    def _local_git_executable(self) -> Path | None:
+        candidates = [
+            LOCAL_GIT_ROOT / "cmd" / "git.exe",
+            LOCAL_GIT_ROOT / "bin" / "git.exe",
+            LOCAL_GIT_ROOT / "mingw64" / "bin" / "git.exe",
+        ]
+        for candidate in candidates:
+            if self._is_git_executable(candidate):
+                return candidate
+        if LOCAL_GIT_ROOT.exists():
+            for candidate in LOCAL_GIT_ROOT.rglob("git.exe"):
+                if self._is_git_executable(candidate):
+                    return candidate
+        return None
+
+    def _ensure_local_git(self, progress_callback=None) -> Path:
+        local_git = self._local_git_executable()
+        if local_git is not None:
+            return local_git
+        if progress_callback:
+            progress_callback(0.22, "Preparing local Git...")
+        download_url, asset_name = self._latest_portable_git_asset()
+        LOCAL_TOOL_DOWNLOADS.mkdir(parents=True, exist_ok=True)
+        archive = LOCAL_TOOL_DOWNLOADS / asset_name
+        if progress_callback:
+            progress_callback(0.28, "Downloading portable Git...")
+        self._download_tool(download_url, archive, 0.28, 0.58, progress_callback, "Downloading portable Git")
+        if progress_callback:
+            progress_callback(0.6, "Extracting portable Git...")
+        temp_extract = LOCAL_TOOL_DOWNLOADS / "git_extract"
+        self._safe_remove_tree(temp_extract)
+        temp_extract.mkdir(parents=True, exist_ok=True)
+        seven_zip = self._prepare_local_7zr()
+        if not seven_zip.exists():
+            raise RuntimeError("Portable 7-Zip extractor is missing. Rebuild the EXE so assets\\7zr.exe is included.")
+        self._run_7zr(seven_zip, ["x", str(archive), f"-o{temp_extract}", "-y"], "Portable Git extraction failed", 0.6, 0.82, progress_callback)
+        self._safe_remove_tree(LOCAL_GIT_ROOT)
+        LOCAL_GIT_ROOT.parent.mkdir(parents=True, exist_ok=True)
+        extracted_git = self._find_extracted_git_root(temp_extract)
+        if extracted_git is None:
+            raise RuntimeError("Portable Git extraction completed, but git.exe was not found.")
+        shutil.move(str(extracted_git), str(LOCAL_GIT_ROOT))
+        self._safe_remove_tree(temp_extract)
+        try:
+            archive.unlink()
+        except OSError:
+            pass
+        local_git = self._local_git_executable()
+        if local_git is None:
+            raise RuntimeError("Local Git setup failed: git.exe was not found after extraction.")
+        if progress_callback:
+            progress_callback(0.84, "Local Git ready.")
+        return local_git
+
+    def _latest_portable_git_asset(self) -> tuple[str, str]:
+        request = urllib.request.Request(PORTABLE_GIT_RELEASE_API, headers={"User-Agent": APP_NAME})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            payload = json.loads(response.read().decode("utf-8", errors="replace"))
+        for asset in payload.get("assets", []):
+            name = str(asset.get("name", ""))
+            lowered = name.lower()
+            if lowered.startswith("portablegit") and "64-bit" in lowered and lowered.endswith(".7z.exe"):
+                url = str(asset.get("browser_download_url", ""))
+                if url:
+                    return url, name
+        raise RuntimeError("Could not find a 64-bit PortableGit asset in the latest Git for Windows release.")
+
+    def _download_tool(self, url: str, destination: Path, start: float, end: float, progress_callback=None, label: str = "Downloading tool") -> None:
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        request = urllib.request.Request(url, headers={"User-Agent": APP_NAME})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            status = getattr(response, "status", 200)
+            if status >= 400:
+                raise RuntimeError(f"{label} failed with HTTP status {status}.")
+            total_size = int(response.headers.get("Content-Length") or 0)
+            last_emit = 0.0
+            downloaded = 0
+            with destination.open("wb") as file:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    file.write(chunk)
+                    downloaded += len(chunk)
+                    now = time.monotonic()
+                    if not progress_callback or now - last_emit < 0.4:
+                        continue
+                    last_emit = now
+                    if total_size:
+                        ratio = min(downloaded / total_size, 1.0)
+                        progress_callback(start + ((end - start) * ratio), f"{label} ({int(ratio * 100)}%)")
+                    else:
+                        progress_callback(start, f"{label} ({downloaded / (1024 * 1024):.1f} MB)")
+        if total_size and downloaded != total_size:
+            raise RuntimeError(f"{label} incomplete: received {downloaded} of {total_size} bytes.")
+
+    @staticmethod
+    def _find_extracted_git_root(folder: Path) -> Path | None:
+        if App._is_git_executable(folder / "cmd" / "git.exe"):
+            return folder
+        for candidate in folder.rglob("git.exe"):
+            if App._is_git_executable(candidate):
+                parent_name = candidate.parent.name.lower()
+                if parent_name == "cmd":
+                    return candidate.parent.parent
+                if parent_name == "bin" and candidate.parent.parent.name.lower() == "mingw64":
+                    return candidate.parent.parent.parent
+                if parent_name == "bin":
+                    return candidate.parent.parent
+                return candidate.parent
+        return None
+
+    @staticmethod
+    def _is_git_executable(path: Path) -> bool:
+        try:
+            if not path.exists() or path.stat().st_size < 1024:
+                return False
+            with path.open("rb") as file:
+                return file.read(2) == b"MZ"
+        except OSError:
+            return False
+
+    def _subprocess_env_with_local_git(self) -> dict[str, str]:
+        env = os.environ.copy()
+        local_git = self._local_git_executable()
+        if local_git is None:
+            return env
+        git_paths = [
+            local_git.parent,
+            LOCAL_GIT_ROOT / "cmd",
+            LOCAL_GIT_ROOT / "bin",
+            LOCAL_GIT_ROOT / "usr" / "bin",
+            LOCAL_GIT_ROOT / "mingw64" / "bin",
+        ]
+        path_prefix = os.pathsep.join(str(path) for path in git_paths if path.exists())
+        if path_prefix:
+            env["PATH"] = f"{path_prefix}{os.pathsep}{env.get('PATH', '')}"
+        return env
 
     @staticmethod
     def _extract_version_from_name(name: str) -> str:
@@ -2343,13 +2525,140 @@ class App(ctk.CTk):
         )
         if not self._ask_confirm("Delete Instance", message):
             return
-        try:
-            self._assert_inside_work_folder(instance_path)
-            self._safe_remove_tree(instance_path)
-            self.config.remove(instance.path)
-        except Exception as exc:
-            self._show_alert("Delete Failed", f"Could not delete the instance: {exc}", "error")
+        self._show_delete_instance_progress(instance)
+
+    def _show_delete_instance_progress(self, instance: ComfyInstance) -> None:
+        dialog = self._make_modal("Deleting Instance", 500, 210)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: self.bell())
+        dialog.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            dialog,
+            text="Deleting Instance",
+            font=ctk.CTkFont(size=20, weight="bold"),
+        ).grid(row=0, column=0, sticky="w", padx=24, pady=(22, 8))
+        status_label = ctk.CTkLabel(
+            dialog,
+            text="Preparing removal...",
+            anchor="w",
+            text_color=("gray35", "gray72"),
+        )
+        status_label.grid(row=1, column=0, sticky="ew", padx=24, pady=(0, 16))
+        progress = ctk.CTkProgressBar(dialog)
+        progress.grid(row=2, column=0, sticky="ew", padx=24, pady=(0, 22))
+        progress.set(0)
+
+        messages: queue.Queue[tuple[str, object]] = queue.Queue()
+        threading.Thread(
+            target=self._delete_instance_worker,
+            args=(instance, self._dedicated_storage_paths_for_delete(instance), messages),
+            daemon=True,
+        ).start()
+        self._poll_delete_instance_progress(dialog, status_label, progress, instance, messages)
+
+    def _poll_delete_instance_progress(
+        self,
+        dialog: ctk.CTkToplevel,
+        status_label: ctk.CTkLabel,
+        progress: ctk.CTkProgressBar,
+        instance: ComfyInstance,
+        messages: queue.Queue[tuple[str, object]],
+    ) -> None:
+        done = False
+        error = ""
+        while True:
+            try:
+                kind, payload = messages.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "STATUS":
+                status_label.configure(text=str(payload))
+            elif kind == "PROGRESS":
+                progress.set(max(0.0, min(1.0, float(payload))))
+            elif kind == "ERROR":
+                error = str(payload)
+                done = True
+            elif kind == "DONE":
+                done = True
+
+        if not done:
+            dialog.after(100, lambda: self._poll_delete_instance_progress(dialog, status_label, progress, instance, messages))
             return
+
+        try:
+            dialog.grab_release()
+        except tk.TclError:
+            pass
+        dialog.destroy()
+        if error:
+            self._show_alert("Delete Failed", f"Could not delete the instance completely:\n\n{error}", "error")
+            return
+        self._finalize_deleted_instance(instance)
+
+    def _delete_instance_worker(
+        self,
+        instance: ComfyInstance,
+        cache_paths: list[Path],
+        messages: queue.Queue[tuple[str, object]],
+    ) -> None:
+        try:
+            instance_path = Path(instance.path)
+            messages.put(("STATUS", "Deleting instance folder..."))
+            messages.put(("PROGRESS", 0.1))
+            self._assert_inside_work_folder(instance_path)
+            self._remove_tree_completely(instance_path)
+
+            if cache_paths:
+                step = 0.45 / max(len(cache_paths), 1)
+                for index, cache_path in enumerate(cache_paths, start=1):
+                    messages.put(("STATUS", f"Deleting dedicated browser cache: {cache_path.name}"))
+                    messages.put(("PROGRESS", 0.45 + (step * (index - 1))))
+                    self._remove_tree_completely(cache_path)
+            messages.put(("STATUS", "Verifying cleanup..."))
+            messages.put(("PROGRESS", 0.9))
+            leftovers = [instance_path, *cache_paths]
+            remaining = [str(path) for path in leftovers if path.exists()]
+            if remaining:
+                raise RuntimeError("Residual files or folders remain:\n" + "\n".join(remaining))
+            messages.put(("PROGRESS", 1.0))
+            messages.put(("STATUS", "Instance deleted."))
+            messages.put(("DONE", ""))
+        except Exception as exc:
+            messages.put(("ERROR", str(exc)))
+
+    def _dedicated_storage_paths_for_delete(self, instance: ComfyInstance) -> list[Path]:
+        if self.config.work_folder is None:
+            return []
+        cache_root = self.config.work_folder / BROWSER_CACHE_FOLDER_NAME
+        if not cache_root.exists():
+            return []
+        candidates: list[Path] = []
+        settings = self._get_instance_settings(instance)
+        saved_path = str(settings.get("dedicated_storage_path", "")).strip()
+        if saved_path:
+            candidates.append(Path(saved_path))
+        candidates.append(cache_root / (self._safe_folder_name(instance.name) or "instance"))
+
+        safe_paths: list[Path] = []
+        for path in candidates:
+            try:
+                resolved = path.resolve()
+                resolved.relative_to(cache_root.resolve())
+            except (OSError, ValueError):
+                continue
+            if resolved not in safe_paths:
+                safe_paths.append(resolved)
+        return safe_paths
+
+    def _finalize_deleted_instance(self, instance: ComfyInstance) -> None:
+        settings_key = self._instance_settings_key(instance)
+        self.config.remove(instance.path)
+        instances = self.config.preferences.get("instances", {})
+        if isinstance(instances, dict):
+            instances.pop(settings_key, None)
+        if self.config.preferences.get("last_selected_instance_path") == instance.path:
+            self.config.preferences.pop("last_selected_instance_path", None)
+            self.config.preferences.pop("last_selected_instance_name", None)
+        self.config.save()
         self.selected_instance = None
         self.detail_title.configure(text="Select an instance")
         self.detail_path.configure(text="Instance deleted from disk. Backups were kept.")
@@ -2357,7 +2666,7 @@ class App(ctk.CTk):
             self._set_entry_display(self.start_bat_entry, "No root .bat found")
         if hasattr(self, "update_bat_entry"):
             self._set_entry_display(self.update_bat_entry, "No update .bat found")
-        self._set_detail_text("Instance deleted. Backups were kept for future restores.")
+        self._set_detail_text("Instance deleted. Dedicated browser cache was removed. Backups were kept for future restores.")
         self._refresh_instances()
 
     def _open_selected_folder(self) -> None:
@@ -2436,26 +2745,32 @@ class App(ctk.CTk):
 
         def worker() -> None:
             try:
-                self.after(0, lambda: self._update_manager_progress(progress, 0.2, "Preparing custom_nodes folder..."))
+                def progress_update(value: float, label: str) -> None:
+                    self.after(0, lambda current=value, text=label: self._update_manager_progress(progress, current, text))
+
+                progress_update(0.12, "Preparing local Git...")
+                git_executable = self._ensure_local_git(progress_update)
+                progress_update(0.2, "Preparing custom_nodes folder...")
                 self._assert_inside_work_folder(custom_nodes)
                 custom_nodes.mkdir(parents=True, exist_ok=True)
                 if manager_folder.exists():
-                    self.after(0, lambda: self._update_manager_progress(progress, 0.35, "Removing existing ComfyUI Manager..."))
+                    progress_update(0.35, "Removing existing ComfyUI Manager...")
                     self._assert_inside_work_folder(manager_folder)
                     self._safe_remove_tree(manager_folder)
-                self.after(0, lambda: self._update_manager_progress(progress, 0.5, "Downloading and installing from GitHub..."))
-                command = ["git", "clone", "https://github.com/ltdrdata/ComfyUI-Manager", "comfyui-manager"]
+                progress_update(0.86, "Downloading and installing from GitHub...")
+                command = [str(git_executable), "clone", "https://github.com/ltdrdata/ComfyUI-Manager", "comfyui-manager"]
                 result = subprocess.run(
                     command,
                     cwd=str(custom_nodes),
                     capture_output=True,
                     text=True,
+                    env=self._subprocess_env_with_local_git(),
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                 )
                 if result.returncode != 0:
                     detail = (result.stderr or result.stdout or "").strip()
                     raise RuntimeError(detail or "git clone failed.")
-                self.after(0, lambda: self._update_manager_progress(progress, 1.0, "Installation completed."))
+                progress_update(1.0, "Installation completed.")
             except Exception as exc:
                 error = str(exc)
                 self.after(0, lambda message=error: self._finish_manager_install(progress, False, message))
@@ -3234,8 +3549,162 @@ class App(ctk.CTk):
         self._center_window(dialog, width, height)
         dialog.transient(self)
         dialog.grab_set()
-        dialog.configure(fg_color=ctk.ThemeManager.theme["CTk"]["fg_color"])
+        self._style_toplevel(dialog)
         return dialog
+
+    def _style_toplevel(self, window: ctk.CTkToplevel) -> None:
+        try:
+            window.configure(fg_color=ctk.ThemeManager.theme["CTk"]["fg_color"])
+        except tk.TclError:
+            pass
+        self._apply_toplevel_icon(window)
+        if os.name == "nt":
+            for delay in (0, 80, 220, 500):
+                window.after(delay, lambda target=window: self._apply_toplevel_window_chrome(target))
+
+    def _apply_toplevel_icon(self, window: ctk.CTkToplevel) -> None:
+        if not ICON_PATH.exists():
+            return
+        try:
+            window.iconbitmap(default=str(ICON_PATH))
+        except Exception:
+            try:
+                window.iconbitmap(str(ICON_PATH))
+            except Exception:
+                pass
+
+    def _apply_toplevel_window_chrome(self, window: ctk.CTkToplevel) -> None:
+        try:
+            if window.winfo_exists():
+                self._apply_toplevel_icon(window)
+                hwnd = self._native_window_handle(window)
+                self._apply_windows_icon_to_hwnd(hwnd)
+                self._apply_titlebar_theme_to_hwnd(hwnd)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _apply_windows_icon_to_hwnd(hwnd: int) -> None:
+        if os.name != "nt" or not hwnd or not ICON_PATH.exists():
+            return
+        try:
+            icon_path = str(ICON_PATH)
+            user32 = ctypes.windll.user32
+            load_image = user32.LoadImageW
+            load_image.argtypes = [
+                wintypes.HINSTANCE,
+                wintypes.LPCWSTR,
+                ctypes.c_uint,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_uint,
+            ]
+            load_image.restype = wintypes.HANDLE
+
+            small_icon = load_image(None, icon_path, 1, 16, 16, 0x00000010)
+            big_icon = load_image(None, icon_path, 1, 32, 32, 0x00000010)
+            if small_icon:
+                user32.SendMessageW(wintypes.HWND(hwnd), 0x0080, 0, small_icon)
+                App._set_window_class_icon(hwnd, -34, small_icon)
+            if big_icon:
+                user32.SendMessageW(wintypes.HWND(hwnd), 0x0080, 1, big_icon)
+                App._set_window_class_icon(hwnd, -14, big_icon)
+        except Exception:
+            pass
+
+    @staticmethod
+    def _set_window_class_icon(hwnd: int, index: int, icon_handle: int) -> None:
+        try:
+            user32 = ctypes.windll.user32
+            if ctypes.sizeof(ctypes.c_void_p) == ctypes.sizeof(ctypes.c_longlong):
+                set_class_long = user32.SetClassLongPtrW
+                set_class_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
+                set_class_long.restype = ctypes.c_void_p
+                set_class_long(wintypes.HWND(hwnd), index, ctypes.c_void_p(icon_handle))
+            else:
+                set_class_long = user32.SetClassLongW
+                set_class_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+                set_class_long.restype = ctypes.c_long
+                set_class_long(wintypes.HWND(hwnd), index, ctypes.c_long(icon_handle))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _native_window_handle(window: tk.Misc) -> int:
+        hwnd = int(window.winfo_id())
+        if os.name != "nt" or not hwnd:
+            return hwnd
+        try:
+            get_ancestor = ctypes.windll.user32.GetAncestor
+            get_ancestor.argtypes = [wintypes.HWND, ctypes.c_uint]
+            get_ancestor.restype = wintypes.HWND
+            root_hwnd = get_ancestor(wintypes.HWND(hwnd), ctypes.c_uint(2))
+            if root_hwnd:
+                return int(root_hwnd)
+        except Exception:
+            pass
+        return hwnd
+
+    def _lock_app_for_installation(self) -> None:
+        self._append_log("The app is locked until the current instance installation is completed.")
+        self._close_dropdown_popup()
+        self.install_locked_control_states = {}
+        if hasattr(self, "cancel_install_button"):
+            self.cancel_install_button.configure(state="normal", text="Cancel installation")
+            self.cancel_install_button.grid()
+        controls: list[tk.Misc] = [
+            getattr(self, "open_work_folder_button", None),
+            getattr(self, "create_work_folder_button", None),
+            getattr(self, "new_name", None),
+            getattr(self, "comfy_version_entry", None),
+            getattr(self, "portable_package_entry", None),
+            getattr(self, "source_url", None),
+            getattr(self, "install_button", None),
+        ]
+        if hasattr(self, "tabs") and hasattr(self.tabs, "_segmented_button"):
+            controls.append(self.tabs._segmented_button)
+        for entry_name in ("comfy_version_entry", "portable_package_entry"):
+            entry = getattr(self, entry_name, None)
+            button = self.dropdown_field_buttons.get(entry)
+            if button is not None:
+                controls.append(button)
+        for control in controls:
+            self._set_install_locked_control_state(control, "disabled")
+
+    def _unlock_app_after_installation(self) -> None:
+        self._restore_install_locked_controls()
+        if hasattr(self, "cancel_install_button"):
+            self.cancel_install_button.grid_remove()
+        self._append_log("The app is unlocked.")
+
+    def _set_install_locked_control_state(self, widget: tk.Misc | None, state: str) -> None:
+        if widget is None:
+            return
+        try:
+            if not widget.winfo_exists():
+                return
+            current_state = self._widget_state(widget)
+            if widget not in self.install_locked_control_states:
+                self.install_locked_control_states[widget] = current_state
+            widget.configure(state=state)
+        except Exception:
+            pass
+
+    def _restore_install_locked_controls(self) -> None:
+        for widget, state in list(self.install_locked_control_states.items()):
+            try:
+                if widget.winfo_exists():
+                    widget.configure(state=state)
+            except Exception:
+                pass
+        self.install_locked_control_states = {}
+
+    @staticmethod
+    def _widget_state(widget: tk.Misc) -> str:
+        try:
+            return str(widget.cget("state"))
+        except Exception:
+            return str(getattr(widget, "_state", "normal"))
 
     def _center_window(self, window: ctk.CTkToplevel, width: int, height: int) -> None:
         self.update_idletasks()
@@ -3481,8 +3950,9 @@ class App(ctk.CTk):
         if destination.exists():
             self._show_alert("Duplicate Instance", "The instance name already matches an existing work folder subfolder.", "error")
             return
+        self.install_cancel_requested.clear()
+        self.current_install_destination = destination
         self.install_in_progress = True
-        self.install_button.configure(state="disabled", text="Installing...")
         self._set_install_progress(0, "Starting installation")
         thread = threading.Thread(
             target=self._install_worker,
@@ -3490,11 +3960,39 @@ class App(ctk.CTk):
             daemon=True,
         )
         thread.start()
+        try:
+            self._lock_app_for_installation()
+        except Exception as exc:
+            self._append_log(f"Interface lock warning: {exc}")
+        self.install_button.configure(state="disabled", text="Installing...")
+
+    def _request_cancel_installation(self) -> None:
+        if not self.install_in_progress:
+            return
+        if not self._ask_confirm(
+            "Cancel Installation",
+            "Cancel the current installation and remove all partial files?",
+        ):
+            return
+        self.install_cancel_requested.set()
+        if hasattr(self, "cancel_install_button"):
+            self.cancel_install_button.configure(state="disabled", text="Cancelling...")
+        self._set_install_progress(0.0, "Cancelling installation")
+        self._append_log("Cancellation requested. Waiting for the current operation to stop.")
+
+    def _raise_if_install_cancelled(self) -> None:
+        if self.install_cancel_requested.is_set():
+            raise InstallationCancelled()
+
+    def _cleanup_cancelled_installation(self, destination: Path) -> None:
+        self._assert_inside_work_folder(destination)
+        self._safe_remove_tree(destination)
 
     def _install_worker(self, name: str, destination: Path, source_url: str, version: str, package_name: str) -> None:
         download_dir = destination / "_download"
         extract_dir = destination / "_extract"
         try:
+            self._raise_if_install_cancelled()
             self._assert_inside_work_folder(destination)
             self._assert_inside_directory(download_dir, destination)
             self._assert_inside_directory(extract_dir, destination)
@@ -3507,6 +4005,7 @@ class App(ctk.CTk):
 
             self.worker_messages.put(f"Downloading ComfyUI {version} / {package_name}: {source_url}")
             self._download_file(source_url, archive, 0.05, 0.72)
+            self._raise_if_install_cancelled()
             archive_size = archive.stat().st_size
             if archive_size < 1024 * 1024:
                 raise RuntimeError(f"Downloaded archive is unexpectedly small ({archive_size} bytes).")
@@ -3520,11 +4019,13 @@ class App(ctk.CTk):
                 self.worker_messages.put("Testing and extracting with local portable 7-Zip.")
             self.worker_messages.put(("PROGRESS", 0.78, "Extracting archive"))
             self._extract_archive(archive, extract_dir, progress_callback=lambda value, label: self.worker_messages.put(("PROGRESS", value, label)))
+            self._raise_if_install_cancelled()
 
             self.worker_messages.put(("PROGRESS", 0.9, "Moving files"))
             roots = [item for item in extract_dir.iterdir() if item.is_dir()]
             source_root = roots[0] if len(roots) == 1 else extract_dir
             for item in source_root.iterdir():
+                self._raise_if_install_cancelled()
                 shutil.move(str(item), str(destination / item.name))
             self.worker_messages.put(("PROGRESS", 0.96, "Cleaning temporary files"))
             self._safe_remove_tree(extract_dir)
@@ -3534,6 +4035,14 @@ class App(ctk.CTk):
             self.worker_messages.put(("PROGRESS", 1.0, "Installation completed"))
             self.worker_messages.put("Installation completed and instance added to the list.")
             self.worker_messages.put("__REFRESH__")
+            self.worker_messages.put("__INSTALL_DONE__")
+        except InstallationCancelled:
+            try:
+                self._cleanup_cancelled_installation(destination)
+                self.worker_messages.put("Installation cancelled. Partial files were removed.")
+            except Exception as cleanup_exc:
+                self.worker_messages.put(f"Installation cancelled, but cleanup failed: {cleanup_exc}")
+            self.worker_messages.put(("PROGRESS", 0.0, "Installation cancelled"))
             self.worker_messages.put("__INSTALL_DONE__")
         except Exception as exc:
             self._safe_remove_tree(extract_dir)
@@ -3568,7 +4077,9 @@ class App(ctk.CTk):
         downloaded = 0
         with destination.open("wb") as file:
             while True:
+                self._raise_if_install_cancelled()
                 chunk = response.read(1024 * 1024)
+                self._raise_if_install_cancelled()
                 if not chunk:
                     break
                 file.write(chunk)
@@ -3600,6 +4111,34 @@ class App(ctk.CTk):
         except OSError:
             shutil.rmtree(path, ignore_errors=True)
 
+    @staticmethod
+    def _remove_tree_completely(path: Path) -> None:
+        if not path.exists():
+            return
+
+        def on_error(function, target, _exc_info) -> None:
+            try:
+                os.chmod(target, 0o700)
+                function(target)
+            except OSError:
+                raise
+
+        last_error: Exception | None = None
+        for _attempt in range(5):
+            try:
+                if path.is_file() or path.is_symlink():
+                    path.unlink()
+                else:
+                    shutil.rmtree(path, onerror=on_error)
+            except Exception as exc:
+                last_error = exc
+                time.sleep(0.25)
+            if not path.exists():
+                return
+        if path.exists():
+            detail = f": {last_error}" if last_error else ""
+            raise RuntimeError(f"Could not fully remove {path}{detail}")
+
     def _assert_inside_work_folder(self, path: Path) -> None:
         if self.config.work_folder is None:
             raise RuntimeError("No work folder is active.")
@@ -3623,19 +4162,25 @@ class App(ctk.CTk):
             return "comfyui_archive.zip"
         return "comfyui_archive.download"
 
-    @staticmethod
-    def _extract_archive(archive: Path, destination: Path, progress_callback=None) -> None:
+    def _extract_archive(self, archive: Path, destination: Path, progress_callback=None) -> None:
         suffix = archive.suffix.lower()
         if suffix == ".zip":
             with zipfile.ZipFile(archive) as zf:
-                zf.extractall(destination)
+                names = zf.infolist()
+                total = max(len(names), 1)
+                for index, item in enumerate(names, start=1):
+                    self._raise_if_install_cancelled()
+                    zf.extract(item, destination)
+                    if progress_callback and index % 25 == 0:
+                        ratio = min(index / total, 1.0)
+                        progress_callback(0.78 + (0.12 * ratio), "Extracting archive")
             return
         if suffix == ".7z":
             seven_zip = App._prepare_local_7zr()
             if not seven_zip.exists():
                 raise RuntimeError("Portable 7-Zip extractor is missing. Rebuild the EXE so assets\\7zr.exe is included.")
-            App._run_7zr(seven_zip, ["t", str(archive)], "7-Zip integrity test failed", 0.78, 0.82, progress_callback)
-            App._run_7zr(seven_zip, ["x", str(archive), f"-o{destination}", "-y"], "7-Zip extraction failed", 0.82, 0.9, progress_callback)
+            self._run_7zr(seven_zip, ["t", str(archive)], "7-Zip integrity test failed", 0.78, 0.82, progress_callback)
+            self._run_7zr(seven_zip, ["x", str(archive), f"-o{destination}", "-y"], "7-Zip extraction failed", 0.82, 0.9, progress_callback)
             return
         raise ValueError("Unsupported archive format. Use a .zip or .7z archive.")
 
@@ -3664,8 +4209,8 @@ class App(ctk.CTk):
         except OSError:
             return False
 
-    @staticmethod
     def _run_7zr(
+        self,
         executable: Path,
         args: list[str],
         error_message: str,
@@ -3689,6 +4234,13 @@ class App(ctk.CTk):
             started_at = time.monotonic()
             phase = "Testing archive" if args and args[0] == "t" else "Extracting archive"
             while process.poll() is None:
+                if self.install_cancel_requested.is_set():
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    raise InstallationCancelled()
                 now = time.monotonic()
                 if progress_callback and now - last_emit >= 0.7:
                     elapsed_ratio = min((now - started_at) / 30.0, 0.92)
@@ -3719,6 +4271,9 @@ class App(ctk.CTk):
                 self._refresh_instances()
             elif message == "__INSTALL_DONE__":
                 self.install_in_progress = False
+                self._unlock_app_after_installation()
+                self.install_cancel_requested.clear()
+                self.current_install_destination = None
                 if hasattr(self, "install_button"):
                     self.install_button.configure(state="normal", text="Download and prepare instance")
             else:

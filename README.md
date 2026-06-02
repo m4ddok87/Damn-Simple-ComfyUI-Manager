@@ -22,6 +22,7 @@ If you think it's appropriate, if you liked my idea, if it was useful to you, bu
 - Preserve backups even when an instance is deleted.
 - Connect instances to a shared `common_models_folder`.
 - Install optional components such as ComfyUI Manager, Triton, and Ultralytics.
+- Download and use a local portable Git tool when needed for ComfyUI Manager installation.
 - Freeze instances to prevent future updates.
 
 ## First Run
@@ -54,7 +55,7 @@ Available actions include:
 - Install Triton.
 - Install Ultralytics.
 - View a graphical disk usage summary for the selected instance, other instances, the Work Folder, and the shared common model folder when connected.
-- Delete the instance from disk while keeping its backups.
+- Delete the instance from disk while keeping its backups and removing its dedicated browser cache.
 
 <img src="screenshots/instances.png" alt="Installed Instacnes section" width="800">
 
@@ -91,6 +92,8 @@ The New Installation section downloads ComfyUI portable packages from GitHub.
 4. Start the download and preparation process.
 
 The app installs ComfyUI into a subfolder of the selected Work Folder. It does not install directly into the Work Folder root.
+
+While an installation is running, the visible interface controls are temporarily disabled to avoid accidental changes. A red `Cancel installation` button appears during the process and can be used to stop the current installation after confirmation. When cancelled, the app removes partial download and extraction files for that instance.
 
 <img src="screenshots/installation.png" alt="New Installation section" width="800">
 
