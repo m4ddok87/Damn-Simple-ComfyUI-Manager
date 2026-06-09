@@ -57,7 +57,7 @@ Available actions include:
 - View a graphical disk usage summary for the selected instance, other instances, the Work Folder, and the shared common model folder when connected.
 - Delete the instance from disk while keeping its backups and removing its dedicated browser cache.
 
-<img src="screenshots/insta.png" alt="Installed Instacnes section" width="800">
+<img src="screenshots/instances.png" alt="Installed Instacnes section" width="800">
 
 When ComfyUI Manager installation needs Git, the app can download and use a local portable Git tool inside its own `_tools` folder instead of requiring Git to be installed globally on Windows.
 
