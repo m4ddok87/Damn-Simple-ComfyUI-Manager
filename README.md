@@ -22,6 +22,7 @@ If you think it's appropriate, if you liked my idea, if it was useful to you, bu
 - Preserve backups even when an instance is deleted.
 - Connect instances to a shared `common_models_folder`.
 - Install optional components such as ComfyUI Manager, Triton, Ultralytics, Flash Attention, and Sage Attention.
+- Use an emergency CUDA/Torch rescue action for broken NVIDIA CUDA instances.
 - Download and use a local portable Git tool when needed for ComfyUI Manager installation.
 - Freeze instances to prevent future updates.
 
@@ -50,9 +51,10 @@ Available actions include:
 - Start the instance.
 - Update the instance.
 - Freeze the instance.
-- Install or reinstall ComfyUI Manager.
+- Install ComfyUI Manager when it is missing.
 - Connect or disconnect `extra_model_paths.yaml` from the common model folder.
 - Open the Library Installation Panel to install or re-install local instance libraries such as Triton, Ultralytics, Flash Attention, and Sage Attention.
+- Use Emergency Restore CUDA/Torch from the Library Installation Panel if a binary attention install breaks the instance Torch environment.
 - Open an embedded Python command prompt for custom instance-level commands.
 - View a graphical disk usage summary for the selected instance, other instances, the Work Folder, and the shared common model folder when connected.
 - Delete the instance from disk while keeping its backups and removing its dedicated browser cache.
@@ -63,9 +65,13 @@ When ComfyUI Manager installation needs Git, the app can download and use a loca
 
 The Library Installation Panel is tied to the selected instance. If a supported library is already present, its button changes to `Re-install` so it can be refreshed inside that same instance.
 
-For binary-sensitive libraries such as Sage Attention and Flash Attention, the app detects the selected instance Python, Torch, CUDA, and Windows platform tags, then installs only an exact matching `.whl` wheel. Compatible wheels are resolved from known Windows AI wheel catalogs such as Wildminder AI-windows-whl and Comfy-Org wheels. If no exact compatible wheel is found, nothing is installed.
+For binary-sensitive libraries such as Sage Attention and Flash Attention, the app detects the selected instance Python, Torch, CUDA, and Windows platform tags, then installs only an exact matching `.whl` wheel. These actions are available only for NVIDIA CUDA instances. Compatible wheels are resolved from known Windows AI wheel catalogs such as Wildminder AI-windows-whl and Comfy-Org wheels. If no exact compatible wheel is found, nothing is installed.
 
 Wheel-based library installs are performed from the downloaded local wheel only, without dependency resolution, so the app does not replace the instance Torch/CUDA environment while installing Flash Attention, Sage Attention, or similar binary-sensitive libraries.
+
+The same panel includes an `Emergency Restore CUDA/Torch` rescue action intended only for broken NVIDIA CUDA instances, for example when an attention-library install has damaged the instance Torch/CUDA environment. This is not a conservative version rollback: it attempts to reinstall the latest available CUDA Torch build from the configured PyTorch CUDA channel.
+
+If Sage Attention or Flash Attention is installed and you try to start the same NVIDIA-oriented instance with a CPU launcher, the app asks for confirmation before continuing.
 
 ## Start Modes
 
@@ -122,7 +128,7 @@ A backup can include all of these items or only some of them.
 
 Backups can be restored to the original instance or to another compatible instance. This is useful when moving settings, workflows, or custom nodes from one ComfyUI installation to another.
 
-Restore operations ask for confirmation before overwriting files.
+Restore operations ask for confirmation before overwriting files and show a progress bar while files are being restored.
 
 ## Common Model Folder
 
@@ -139,5 +145,3 @@ Damn Simple ComfyUI Manager is focused on local portable use. It is meant to kee
 ## License
 
 Damn Simple ComfyUI Manager is released under the GNU General Public License v3.0.
-
-Copyright (c) 2026 maddok.

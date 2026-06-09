@@ -235,6 +235,7 @@ class App(ctk.CTk):
         self.package_values: list[str] = []
         self.dropdown_popup: ctk.CTkToplevel | None = None
         self.dropdown_toggle_button: ctk.CTkButton | None = None
+        self.dropdown_grab_owner: tk.Misc | None = None
         self.dropdown_click_protected_until = 0.0
         self.release_assets: dict[str, dict[str, str]] = {}
         self.worker_messages: queue.Queue[str] = queue.Queue()
@@ -1094,6 +1095,13 @@ class App(ctk.CTk):
         if self.dropdown_popup is not None and self.dropdown_popup.winfo_exists():
             self.dropdown_popup.destroy()
         self.dropdown_popup = None
+        if self.dropdown_grab_owner is not None:
+            try:
+                if self.dropdown_grab_owner.winfo_exists():
+                    self.dropdown_grab_owner.grab_set()
+            except tk.TclError:
+                pass
+        self.dropdown_grab_owner = None
         if self.dropdown_toggle_button is not None:
             try:
                 self.dropdown_toggle_button.configure(text="▼")
@@ -1180,6 +1188,15 @@ class App(ctk.CTk):
         return "portable"
 
     @staticmethod
+    def _hardware_kind_from_package(package_name: str) -> str:
+        slug = App._hardware_slug(package_name)
+        if slug.startswith("nvidia"):
+            return "nvidia"
+        if slug in {"amd", "intel"}:
+            return slug
+        return "unknown"
+
+    @staticmethod
     def _safe_folder_name(name: str) -> str:
         cleaned = re.sub(r"[^A-Za-z0-9_.-]+", "-", name).strip(".- ")
         return cleaned
@@ -1254,11 +1271,13 @@ class App(ctk.CTk):
         ultralytics_status = "installed" if self._is_ultralytics_installed(instance) else "not installed"
         sage_attention_status = "installed" if self._is_sage_attention_installed(instance) else "not installed"
         flash_attention_status = "installed" if self._is_flash_attention_installed(instance) else "not installed"
+        hardware_kind = self._instance_hardware_kind(instance)
         self._set_detail_text(
             f"Status: {status}\n"
             f"Created/registered: {created}\n"
             f"Disk Usage: calculating...\n"
             f"Backup: {backup_text}\n"
+            f"Hardware type: {hardware_kind}\n"
             f"Triton: {triton_status}\n"
             f"Ultralytics: {ultralytics_status}\n"
             f"Sage Attention: {sage_attention_status}\n"
@@ -1697,8 +1716,11 @@ class App(ctk.CTk):
         if hasattr(self, "freeze_instance_button"):
             self.freeze_instance_button.configure(state="disabled" if frozen else "normal")
         if hasattr(self, "comfyui_manager_button"):
-            manager_text = "Re-install ComfyUI Manager" if self._comfyui_manager_path(instance).exists() else "Install ComfyUI Manager"
-            self.comfyui_manager_button.configure(text=manager_text, state="normal")
+            manager_installed = self._comfyui_manager_path(instance).exists()
+            self.comfyui_manager_button.configure(
+                text="Install ComfyUI Manager",
+                state="disabled" if manager_installed else "normal",
+            )
         if hasattr(self, "disconnect_yaml_button"):
             active_yaml = self._resolve_comfy_root(Path(instance.path)) / "extra_model_paths.yaml"
             self.disconnect_yaml_button.configure(state="normal" if active_yaml.exists() else "disabled")
@@ -1802,6 +1824,63 @@ class App(ctk.CTk):
         ]
         return any(path.exists() for path in markers)
 
+    def _instance_hardware_kind(self, instance: ComfyInstance, refresh: bool = False) -> str:
+        settings = self._get_instance_settings(instance)
+        cached = str(settings.get("hardware_kind", "")).lower()
+        if not refresh and cached in {"nvidia", "amd", "intel", "cpu", "unknown"}:
+            return cached
+        detected = self._detect_instance_hardware_kind(instance)
+        settings["hardware_kind"] = detected
+        self.config.save()
+        return detected
+
+    def _detect_instance_hardware_kind(self, instance: ComfyInstance) -> str:
+        root = Path(instance.path)
+        bat_names = [path.name.lower() for path in root.glob("*.bat")]
+        if any("nvidia" in name for name in bat_names):
+            return "nvidia"
+        if any("amd" in name for name in bat_names):
+            return "amd"
+        if any("intel" in name for name in bat_names):
+            return "intel"
+        python_path = self._embedded_python_path(instance)
+        if python_path.exists():
+            code = (
+                "import json\n"
+                "info = {'cuda_build': '', 'cuda_available': False, 'error': ''}\n"
+                "try:\n"
+                "    import torch\n"
+                "    info['cuda_build'] = str(getattr(torch.version, 'cuda', '') or '')\n"
+                "    try:\n"
+                "        info['cuda_available'] = bool(torch.cuda.is_available())\n"
+                "    except Exception:\n"
+                "        info['cuda_available'] = False\n"
+                "except Exception as exc:\n"
+                "    info['error'] = str(exc)\n"
+                "print(json.dumps(info))\n"
+            )
+            try:
+                result = subprocess.run(
+                    [str(python_path), "-c", code],
+                    cwd=str(root),
+                    capture_output=True,
+                    text=True,
+                    timeout=12,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+                if result.returncode == 0:
+                    info = json.loads(result.stdout.strip().splitlines()[-1])
+                    if str(info.get("cuda_build", "")).strip() or bool(info.get("cuda_available", False)):
+                        return "nvidia"
+            except Exception:
+                pass
+        if any("cpu" in name for name in bat_names):
+            return "cpu"
+        return "unknown"
+
+    def _is_nvidia_instance(self, instance: ComfyInstance) -> bool:
+        return self._instance_hardware_kind(instance) == "nvidia"
+
     @staticmethod
     def _preferred_bat(saved_value: str, values: list[str]) -> str:
         if saved_value in values:
@@ -1865,6 +1944,8 @@ class App(ctk.CTk):
         if not bat_name or not bat_path.exists():
             self._show_alert("Missing Launcher", "Choose an existing .bat file from the instance root.", "warning")
             return
+        if not self._confirm_cpu_launch_with_attention_if_needed(self.selected_instance, bat_name):
+            return
         dedicated_mode = self.start_mode_var.get() == "Dedicated"
         if dedicated_mode:
             url = self._dedicated_url_for_instance(self.selected_instance)
@@ -1903,6 +1984,28 @@ class App(ctk.CTk):
         except Exception as exc:
             self._show_alert("Start Failed", f"Could not start the instance: {exc}", "error")
             return
+
+    def _confirm_cpu_launch_with_attention_if_needed(self, instance: ComfyInstance, bat_name: str) -> bool:
+        if not self._is_nvidia_instance(instance):
+            return True
+        if "cpu" not in bat_name.lower():
+            return True
+        installed_attention = []
+        if self._is_sage_attention_installed(instance):
+            installed_attention.append("Sage Attention")
+        if self._is_flash_attention_installed(instance):
+            installed_attention.append("Flash Attention")
+        if not installed_attention:
+            return True
+        libraries = " and ".join(installed_attention)
+        return self._ask_confirm(
+            "CPU Launcher Warning",
+            (
+                f"{libraries} is installed in this NVIDIA-oriented instance. "
+                "Starting it with the CPU launcher may cause errors or odd behavior. "
+                "Continue anyway?"
+            ),
+        )
 
     def _update_selected_instance(self) -> None:
         if self.selected_instance is None:
@@ -2518,7 +2621,11 @@ class App(ctk.CTk):
             proceed = self._ask_confirm("Add Folder", "This folder does not appear to contain ComfyUI. Add it anyway?")
             if not proceed:
                 return
-        self.config.add(ComfyInstance(name=name, path=str(path), created_at=time.time()))
+        instance = ComfyInstance(name=name, path=str(path), created_at=time.time())
+        self.config.add(instance)
+        settings = self._get_instance_settings(instance)
+        settings["hardware_kind"] = self._detect_instance_hardware_kind(instance)
+        self.config.save()
         self._refresh_instances()
 
     def _remove_selected(self) -> None:
@@ -2763,8 +2870,9 @@ class App(ctk.CTk):
         custom_nodes = comfy_root / "custom_nodes"
         manager_folder = self._comfyui_manager_path(instance)
         if manager_folder.exists():
-            if not self._ask_confirm("Reinstall ComfyUI Manager", "ComfyUI Manager is already installed. Delete it and reinstall?"):
-                return
+            self._show_alert("ComfyUI Manager Installed", "ComfyUI Manager is already installed in this instance.", "info")
+            self._refresh_instance_action_fields(instance)
+            return
         if not self._ask_confirm(
             "Install ComfyUI Manager",
             "This will download ComfyUI Manager from GitHub and install it into the selected instance. Continue?",
@@ -2785,10 +2893,6 @@ class App(ctk.CTk):
                 progress_update(0.2, "Preparing custom_nodes folder...")
                 self._assert_inside_work_folder(custom_nodes)
                 custom_nodes.mkdir(parents=True, exist_ok=True)
-                if manager_folder.exists():
-                    progress_update(0.35, "Removing existing ComfyUI Manager...")
-                    self._assert_inside_work_folder(manager_folder)
-                    self._safe_remove_tree(manager_folder)
                 progress_update(0.86, "Downloading and installing from GitHub...")
                 command = [str(git_executable), "clone", "https://github.com/ltdrdata/ComfyUI-Manager", "comfyui-manager"]
                 result = subprocess.run(
@@ -2978,6 +3082,9 @@ class App(ctk.CTk):
         if target is None:
             self._show_alert("No Instance Selected", "Select an instance first.", "info")
             return
+        if not self._is_nvidia_instance(target):
+            self._show_alert("NVIDIA CUDA Required", "Sage Attention can only be installed on NVIDIA CUDA instances.", "warning")
+            return
         self._install_matched_wheel_library(
             instance=target,
             library_name="Sage Attention",
@@ -2991,6 +3098,9 @@ class App(ctk.CTk):
         if target is None:
             self._show_alert("No Instance Selected", "Select an instance first.", "info")
             return
+        if not self._is_nvidia_instance(target):
+            self._show_alert("NVIDIA CUDA Required", "Flash Attention can only be installed on NVIDIA CUDA instances.", "warning")
+            return
         self._install_matched_wheel_library(
             instance=target,
             library_name="Flash Attention",
@@ -2998,6 +3108,91 @@ class App(ctk.CTk):
             project_names=["flash-attn", "flash_attn"],
             is_installed=self._is_flash_attention_installed,
         )
+
+    def _restore_cuda_torch(self, instance: ComfyInstance | None = None) -> None:
+        target = instance or self.selected_instance
+        if target is None:
+            self._show_alert("No Instance Selected", "Select an instance first.", "info")
+            return
+        if not self._is_nvidia_instance(target):
+            self._show_alert("NVIDIA CUDA Required", "Emergency Restore CUDA/Torch is available only for NVIDIA CUDA instances.", "warning")
+            return
+        python_path = self._embedded_python_path(target)
+        if not python_path.exists():
+            self._show_alert("Embedded Python Missing", "This instance does not contain python_embeded\\python.exe.", "error")
+            return
+        if not self._ask_confirm(
+            "Emergency Restore CUDA/Torch",
+            (
+                "Warning, this emergency operation will try to reinstall the latest available CUDA Torch build "
+                "inside the instance. Use it only if the instance is blocked or if installing Flash Attention "
+                "or Sage Attention caused startup errors."
+            ),
+        ):
+            return
+        progress = self._open_manager_progress_dialog(
+            "Preparing emergency CUDA/Torch restore...",
+            title="Emergency Restore CUDA/Torch",
+            heading="Emergency CUDA/Torch Restore",
+        )
+        if hasattr(self, "restore_cuda_torch_button"):
+            self.restore_cuda_torch_button.configure(state="disabled")
+
+        def worker() -> None:
+            try:
+                self._assert_inside_work_folder(python_path)
+                self.after(0, lambda: self._update_manager_progress(progress, 0.15, "Installing latest PyTorch CUDA build..."))
+                command = [
+                    str(python_path),
+                    "-s",
+                    "-m",
+                    "pip",
+                    "install",
+                    "--upgrade",
+                    "--force-reinstall",
+                    "torch",
+                    "torchvision",
+                    "torchaudio",
+                    "--index-url",
+                    "https://download.pytorch.org/whl/cu130",
+                ]
+                result = subprocess.run(
+                    command,
+                    cwd=str(Path(target.path)),
+                    capture_output=True,
+                    text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+                self.after(0, lambda: self._update_manager_progress(progress, 0.86, "Checking restored Torch..."))
+                if result.returncode != 0:
+                    detail = (result.stderr or result.stdout or "").strip()
+                    raise RuntimeError(detail or "Torch restore failed.")
+                environment = self._detect_instance_wheel_environment(target)
+                if not str(environment.get("cuda_tag", "")).strip():
+                    raise RuntimeError("Torch was installed, but CUDA is still not available in this instance.")
+                self.after(0, lambda: self._update_manager_progress(progress, 1.0, "Emergency CUDA/Torch restore completed."))
+            except Exception as exc:
+                error = str(exc)
+                self.after(0, lambda message=error: self._finish_cuda_torch_restore(progress, False, message))
+                return
+            self.after(0, lambda: self._finish_cuda_torch_restore(progress, True, ""))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_cuda_torch_restore(self, progress: dict[str, object], success: bool, error: str) -> None:
+        dialog = progress.get("dialog")
+        if isinstance(dialog, ctk.CTkToplevel) and dialog.winfo_exists():
+            dialog.destroy()
+        if self.selected_instance is not None:
+            self._refresh_instance_action_fields(self.selected_instance)
+            self._select_instance(self.selected_instance)
+            self._refresh_library_panel_buttons()
+        if hasattr(self, "restore_cuda_torch_button"):
+            self.restore_cuda_torch_button.configure(state="normal")
+        if success:
+            self._show_alert("CUDA/Torch Restored", "Emergency CUDA/Torch restore completed inside the instance.", "info")
+        else:
+            self._show_alert("CUDA/Torch Restore Failed", f"Could not restore CUDA/Torch: {error}", "error")
 
     def _install_matched_wheel_library(
         self,
@@ -3360,7 +3555,7 @@ class App(ctk.CTk):
             self._show_alert("No Instance Selected", "Select an instance first.", "info")
             return
         instance = self.selected_instance
-        dialog = self._make_modal(f"Library Installation Panel - {instance.name}", 520, 290)
+        dialog = self._make_modal(f"Library Installation Panel - {instance.name}", 560, 500)
         dialog.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             dialog,
@@ -3383,20 +3578,57 @@ class App(ctk.CTk):
             height=40,
         )
         self.library_ultralytics_button.grid(row=2, column=0, sticky="ew", padx=24, pady=5)
+
+        ctk.CTkFrame(dialog, height=1, fg_color=("gray74", "gray28")).grid(
+            row=3, column=0, sticky="ew", padx=24, pady=(14, 12)
+        )
+        self.attention_warning_label = ctk.CTkLabel(
+            dialog,
+            text=(
+                "Warning: installing Sage or Flash Attention can make your instance unstable. "
+                "Use it at your own risk."
+            ),
+            wraplength=500,
+            justify="left",
+            text_color=("#b45309", "#facc15"),
+        )
+        self.attention_warning_label.grid(row=4, column=0, sticky="ew", padx=24, pady=(0, 10))
+        self.attention_hardware_label = ctk.CTkLabel(
+            dialog,
+            text="Sage Attention, Flash Attention, and Emergency Restore CUDA/Torch are available only for NVIDIA CUDA instances.",
+            wraplength=500,
+            justify="left",
+            text_color=("#b45309", "#facc15"),
+        )
+        self.attention_hardware_label.grid(row=5, column=0, sticky="ew", padx=24, pady=(0, 10))
+
         self.library_sage_attention_button = ctk.CTkButton(
             dialog,
             text="Install Sage Attention",
             command=lambda item=instance: self._install_sage_attention(item),
             height=40,
         )
-        self.library_sage_attention_button.grid(row=3, column=0, sticky="ew", padx=24, pady=5)
+        self.library_sage_attention_button.grid(row=6, column=0, sticky="ew", padx=24, pady=5)
         self.library_flash_attention_button = ctk.CTkButton(
             dialog,
             text="Install Flash Attention",
             command=lambda item=instance: self._install_flash_attention(item),
             height=40,
         )
-        self.library_flash_attention_button.grid(row=4, column=0, sticky="ew", padx=24, pady=(5, 24))
+        self.library_flash_attention_button.grid(row=7, column=0, sticky="ew", padx=24, pady=5)
+
+        ctk.CTkFrame(dialog, height=1, fg_color=("gray74", "gray28")).grid(
+            row=8, column=0, sticky="ew", padx=24, pady=(14, 12)
+        )
+        self.restore_cuda_torch_button = ctk.CTkButton(
+            dialog,
+            text="Emergency Restore CUDA/Torch",
+            command=lambda item=instance: self._restore_cuda_torch(item),
+            height=40,
+            fg_color=("#dc2626", "#ef4444"),
+            hover_color=("#b91c1c", "#dc2626"),
+        )
+        self.restore_cuda_torch_button.grid(row=9, column=0, sticky="ew", padx=24, pady=(0, 24))
         dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
         self._refresh_library_panel_buttons()
 
@@ -3422,6 +3654,31 @@ class App(ctk.CTk):
             self._configure_library_button(self.library_sage_attention_button, "Sage Attention", self._is_sage_attention_installed(instance))
         if hasattr(self, "library_flash_attention_button"):
             self._configure_library_button(self.library_flash_attention_button, "Flash Attention", self._is_flash_attention_installed(instance))
+        nvidia_enabled = self._is_nvidia_instance(instance)
+        if hasattr(self, "library_sage_attention_button"):
+            self.library_sage_attention_button.configure(state="normal" if nvidia_enabled else "disabled")
+        if hasattr(self, "library_flash_attention_button"):
+            self.library_flash_attention_button.configure(state="normal" if nvidia_enabled else "disabled")
+        if hasattr(self, "restore_cuda_torch_button"):
+            self.restore_cuda_torch_button.configure(state="normal" if nvidia_enabled else "disabled")
+        if hasattr(self, "attention_hardware_label"):
+            hardware = self._instance_hardware_kind(instance)
+            suffix = "" if nvidia_enabled else f" Current instance type: {hardware}."
+            self.attention_hardware_label.configure(
+                text=(
+                    "Sage Attention, Flash Attention, and Emergency Restore CUDA/Torch are available only for NVIDIA CUDA instances."
+                    f"{suffix}"
+                )
+            )
+            if nvidia_enabled:
+                self.attention_hardware_label.grid_remove()
+            else:
+                self.attention_hardware_label.grid()
+        if hasattr(self, "attention_warning_label"):
+            if nvidia_enabled:
+                self.attention_warning_label.grid()
+            else:
+                self.attention_warning_label.grid_remove()
 
     @staticmethod
     def _configure_library_button(button: ctk.CTkButton, library_name: str, installed: bool) -> None:
@@ -3884,13 +4141,30 @@ class App(ctk.CTk):
                 row=row, column=0, sticky="w", padx=20, pady=5
             )
 
-        ctk.CTkButton(
+        progress_row = 4 + len(items)
+        progress_label = ctk.CTkLabel(dialog, text="Ready", anchor="w", text_color=("gray35", "gray72"))
+        progress_label.grid(row=progress_row, column=0, sticky="ew", padx=20, pady=(12, 4))
+        progress_bar = ctk.CTkProgressBar(dialog)
+        progress_bar.grid(row=progress_row + 1, column=0, sticky="ew", padx=20, pady=(0, 8))
+        progress_bar.set(0)
+
+        restore_button = ctk.CTkButton(
             dialog,
             text="Restore Backup",
-            command=lambda: self._restore_backup_from_dialog(dialog, target_selection["value"], variables),
             fg_color=("#7c3aed", "#a855f7"),
             hover_color=("#6d28d9", "#9333ea"),
-        ).grid(row=4 + len(items), column=0, sticky="ew", padx=20, pady=(18, 10))
+        )
+        restore_button.configure(
+            command=lambda: self._restore_backup_from_dialog(
+                dialog,
+                target_selection["value"],
+                variables,
+                restore_button,
+                progress_bar,
+                progress_label,
+            )
+        )
+        restore_button.grid(row=progress_row + 2, column=0, sticky="ew", padx=20, pady=(18, 10))
 
     def _set_restore_target(self, entry: ctk.CTkEntry, selection: dict[str, str], value: str) -> None:
         selection["value"] = value
@@ -3901,15 +4175,23 @@ class App(ctk.CTk):
         if not values:
             return
         self._protect_dropdown_opening_click()
-        self.dropdown_popup = ctk.CTkToplevel(self)
+        owner = entry.winfo_toplevel()
+        self.dropdown_popup = ctk.CTkToplevel(owner)
         self.dropdown_popup.overrideredirect(True)
-        self.dropdown_popup.transient(self)
+        self.dropdown_popup.transient(owner)
         x = entry.winfo_rootx()
         y = entry.winfo_rooty() + entry.winfo_height() + 4
         width = entry.winfo_width() + 50
         self.dropdown_popup.geometry(f"{width}x220+{x}+{y}")
         self.dropdown_popup.grid_columnconfigure(0, weight=1)
         self.dropdown_popup.grid_rowconfigure(0, weight=1)
+        if owner is not self and isinstance(owner, ctk.CTkToplevel):
+            try:
+                owner.grab_release()
+                self.dropdown_popup.grab_set()
+                self.dropdown_grab_owner = owner
+            except tk.TclError:
+                self.dropdown_grab_owner = None
         list_frame = ctk.CTkScrollableFrame(self.dropdown_popup, corner_radius=8)
         list_frame.grid(row=0, column=0, sticky="nsew")
         list_frame.grid_columnconfigure(0, weight=1)
@@ -3928,7 +4210,15 @@ class App(ctk.CTk):
         self._close_dropdown_popup()
         callback(value)
 
-    def _restore_backup_from_dialog(self, dialog: ctk.CTkToplevel, target_name: str, variables: dict[str, tk.BooleanVar]) -> None:
+    def _restore_backup_from_dialog(
+        self,
+        dialog: ctk.CTkToplevel,
+        target_name: str,
+        variables: dict[str, tk.BooleanVar],
+        restore_button: ctk.CTkButton,
+        progress_bar: ctk.CTkProgressBar,
+        progress_label: ctk.CTkLabel,
+    ) -> None:
         selected_items = [name for name, variable in variables.items() if variable.get()]
         if not selected_items:
             self._show_alert("No Items Selected", "Select at least one item to restore.", "error")
@@ -3939,17 +4229,63 @@ class App(ctk.CTk):
             return
         if not self._ask_confirm("Restore Backup", f"Restore selected backup items into {target.name}? Existing files with the same names will be overwritten."):
             return
-        try:
-            self._restore_backup(self.selected_backup_path, Path(target.path), selected_items)
-        except Exception as exc:
-            self._show_alert("Restore Failed", f"Restore failed: {exc}", "error")
+        backup_path = self.selected_backup_path
+        restore_button.configure(state="disabled", text="Restoring backup...")
+        self._set_backup_progress(progress_bar, progress_label, 0.02, "Preparing restore...")
+
+        def progress_callback(value: float, label: str) -> None:
+            self.after(0, lambda current=value, text=label: self._set_backup_progress(progress_bar, progress_label, current, text))
+
+        def worker() -> None:
+            try:
+                self._restore_backup(backup_path, Path(target.path), selected_items, progress_callback)
+            except Exception as exc:
+                error = str(exc)
+                self.after(0, lambda message=error: self._finish_restore_backup_dialog(
+                    dialog,
+                    restore_button,
+                    progress_bar,
+                    progress_label,
+                    False,
+                    message,
+                ))
+                return
+            self.after(0, lambda: self._finish_restore_backup_dialog(
+                dialog,
+                restore_button,
+                progress_bar,
+                progress_label,
+                True,
+                "",
+            ))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_restore_backup_dialog(
+        self,
+        dialog: ctk.CTkToplevel,
+        restore_button: ctk.CTkButton,
+        progress_bar: ctk.CTkProgressBar,
+        progress_label: ctk.CTkLabel,
+        success: bool,
+        error: str,
+    ) -> None:
+        if not success:
+            if restore_button.winfo_exists():
+                restore_button.configure(state="normal", text="Restore Backup")
+            self._set_backup_progress(progress_bar, progress_label, 0, "Restore failed")
+            self._show_alert("Restore Failed", f"Restore failed: {error}", "error")
             return
-        dialog.destroy()
+        self._set_backup_progress(progress_bar, progress_label, 1.0, "Restore completed")
+        if dialog.winfo_exists():
+            dialog.destroy()
         self._show_alert("Backup Restored", "Backup restored.", "info")
 
-    def _restore_backup(self, backup_path: Path | None, target_path: Path, selected_items: list[str]) -> None:
+    def _restore_backup(self, backup_path: Path | None, target_path: Path, selected_items: list[str], progress_callback=None) -> None:
         if backup_path is None:
             raise RuntimeError("No backup selected.")
+        if progress_callback:
+            progress_callback(0.05, "Checking restore target...")
         self._assert_inside_work_folder(backup_path)
         self._assert_inside_work_folder(target_path)
         if not target_path.exists():
@@ -3960,18 +4296,31 @@ class App(ctk.CTk):
         with zipfile.ZipFile(backup_path) as archive:
             names = [name.replace("\\", "/") for name in archive.namelist()]
             archive_roots = self._backup_item_archive_roots(archive, names)
-            for member in archive.infolist():
+            members = [
+                member for member in archive.infolist()
+                if not member.filename.replace("\\", "/").endswith("/")
+                and not member.filename.replace("\\", "/").startswith("_ds_meta/")
+                and self._logical_backup_item_for_archive_name(member.filename.replace("\\", "/"), archive_roots) in selected_roots
+            ]
+            total_files = max(len(members), 1)
+            if progress_callback:
+                progress_callback(0.12, f"Restoring {len(members)} file(s)...")
+            last_emit = 0.0
+            for index, member in enumerate(members, start=1):
                 name = member.filename.replace("\\", "/")
-                if name.endswith("/") or name.startswith("_ds_meta/"):
-                    continue
                 logical_item = self._logical_backup_item_for_archive_name(name, archive_roots)
-                if logical_item not in selected_roots:
-                    continue
                 output_path = target_path / name
                 self._assert_inside_directory(output_path, target_path)
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(member) as source, output_path.open("wb") as target:
                     shutil.copyfileobj(source, target)
+                now = time.monotonic()
+                if progress_callback and (index == total_files or index % 20 == 0 or now - last_emit >= 0.25):
+                    last_emit = now
+                    progress = 0.12 + (0.82 * (index / total_files))
+                    progress_callback(progress, f"Restoring {logical_item} ({index}/{total_files})")
+        if progress_callback:
+            progress_callback(1.0, "Restore completed")
 
     def _inspect_backup(self, backup_path: Path) -> dict[str, object]:
         with zipfile.ZipFile(backup_path) as archive:
@@ -4271,7 +4620,7 @@ class App(ctk.CTk):
         ).grid(row=message_row + 1, column=0, sticky="e", padx=24, pady=(0, 20))
         dialog.wait_window()
 
-    def _ask_confirm(self, title: str, message: str) -> bool:
+    def _ask_confirm(self, title: str, message: str, confirm_text: str = "Confirm", cancel_text: str = "Cancel") -> bool:
         result = {"value": False}
         dialog = self._make_modal(title, 500, 240)
         dialog.grid_columnconfigure((0, 1), weight=1)
@@ -4286,12 +4635,12 @@ class App(ctk.CTk):
             result["value"] = value
             dialog.destroy()
 
-        ctk.CTkButton(dialog, text="Cancel", command=lambda: choose(False), fg_color=("gray65", "gray28")).grid(
+        ctk.CTkButton(dialog, text=cancel_text, command=lambda: choose(False), fg_color=("gray65", "gray28")).grid(
             row=2, column=0, sticky="ew", padx=(24, 8), pady=(0, 22)
         )
         ctk.CTkButton(
             dialog,
-            text="Confirm",
+            text=confirm_text,
             command=lambda: choose(True),
             fg_color=("#7c3aed", "#a855f7"),
             hover_color=("#6d28d9", "#9333ea"),
@@ -4562,7 +4911,13 @@ class App(ctk.CTk):
             self._safe_remove_tree(extract_dir)
             self._safe_remove_tree(download_dir)
 
-            self.config.add(ComfyInstance(name=name, path=str(destination), created_at=time.time()))
+            instance = ComfyInstance(name=name, path=str(destination), created_at=time.time())
+            self.config.add(instance)
+            settings = self._get_instance_settings(instance)
+            settings["hardware_kind"] = self._hardware_kind_from_package(package_name)
+            settings["portable_package"] = package_name
+            settings["comfy_version"] = version
+            self.config.save()
             self.worker_messages.put(("PROGRESS", 1.0, "Installation completed"))
             self.worker_messages.put("Installation completed and instance added to the list.")
             self.worker_messages.put("__REFRESH__")
