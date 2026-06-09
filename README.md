@@ -21,7 +21,7 @@ If you think it's appropriate, if you liked my idea, if it was useful to you, bu
 - Create and restore targeted, customizable backups.
 - Preserve backups even when an instance is deleted.
 - Connect instances to a shared `common_models_folder`.
-- Install optional components such as ComfyUI Manager, Triton, and Ultralytics.
+- Install optional components such as ComfyUI Manager, Triton, Ultralytics, Flash Attention, and Sage Attention.
 - Download and use a local portable Git tool when needed for ComfyUI Manager installation.
 - Freeze instances to prevent future updates.
 
@@ -52,12 +52,20 @@ Available actions include:
 - Freeze the instance.
 - Install or reinstall ComfyUI Manager.
 - Connect or disconnect `extra_model_paths.yaml` from the common model folder.
-- Install Triton.
-- Install Ultralytics.
+- Open the Library Installation Panel to install or re-install local instance libraries such as Triton, Ultralytics, Flash Attention, and Sage Attention.
+- Open an embedded Python command prompt for custom instance-level commands.
 - View a graphical disk usage summary for the selected instance, other instances, the Work Folder, and the shared common model folder when connected.
 - Delete the instance from disk while keeping its backups and removing its dedicated browser cache.
 
 <img src="screenshots/instances.png" alt="Installed Instacnes section" width="800">
+
+When ComfyUI Manager installation needs Git, the app can download and use a local portable Git tool inside its own `_tools` folder instead of requiring Git to be installed globally on Windows.
+
+The Library Installation Panel is tied to the selected instance. If a supported library is already present, its button changes to `Re-install` so it can be refreshed inside that same instance.
+
+For binary-sensitive libraries such as Sage Attention and Flash Attention, the app detects the selected instance Python, Torch, CUDA, and Windows platform tags, then installs only an exact matching `.whl` wheel. Compatible wheels are resolved from known Windows AI wheel catalogs such as Wildminder AI-windows-whl and Comfy-Org wheels. If no exact compatible wheel is found, nothing is installed.
+
+Wheel-based library installs are performed from the downloaded local wheel only, without dependency resolution, so the app does not replace the instance Torch/CUDA environment while installing Flash Attention, Sage Attention, or similar binary-sensitive libraries.
 
 ## Start Modes
 

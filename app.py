@@ -82,6 +82,12 @@ BUNDLED_SEVEN_ZIP_PATH = ASSET_ROOT / "7zr.exe"
 LOCAL_SEVEN_ZIP_PATH = APP_ROOT / "_tools" / "7zr.exe"
 LOCAL_GIT_ROOT = APP_ROOT / "_tools" / "git"
 LOCAL_TOOL_DOWNLOADS = APP_ROOT / "_tools" / "downloads"
+COMFY_WHEEL_INDEX_BASES = [
+    "https://comfy-org.github.io/wheels/",
+    "https://comfy-org.github.io/wheels/v2/",
+]
+WILDMINDER_WHEELS_JSON_URL = "https://raw.githubusercontent.com/wildminder/AI-windows-whl/main/wheels.json"
+WILDMINDER_WHEELS_PAGE_URL = "https://wildminder.github.io/AI-windows-whl/"
 
 
 @dataclass
@@ -651,22 +657,22 @@ class App(ctk.CTk):
             hover_color=("#b91c1c", "#dc2626"),
         )
         self.disconnect_yaml_button.grid(row=0, column=1, sticky="ew", padx=(6, 0), pady=4)
-        self.install_triton_button = ctk.CTkButton(
+        self.library_panel_button = ctk.CTkButton(
             tools,
-            text="Install Triton",
-            command=self._install_triton,
+            text="Library Installation Panel",
+            command=self._open_library_installation_panel,
+            fg_color=("#c026d3", "#d946ef"),
+            hover_color=("#a21caf", "#c026d3"),
+        )
+        self.library_panel_button.grid(row=2, column=0, sticky="ew", padx=(0, 6), pady=4)
+        self.embedded_python_cmd_button = ctk.CTkButton(
+            tools,
+            text="Run Embedded Python cmd",
+            command=self._run_embedded_python_cmd,
             fg_color=("gray62", "gray32"),
             hover_color=("gray55", "gray40"),
         )
-        self.install_triton_button.grid(row=2, column=0, sticky="ew", padx=(0, 6), pady=4)
-        self.install_ultralytics_button = ctk.CTkButton(
-            tools,
-            text="Install Ultralytics",
-            command=self._install_ultralytics,
-            fg_color=("gray62", "gray32"),
-            hover_color=("gray55", "gray40"),
-        )
-        self.install_ultralytics_button.grid(row=3, column=0, sticky="ew", padx=(0, 6), pady=4)
+        self.embedded_python_cmd_button.grid(row=3, column=0, sticky="ew", padx=(0, 6), pady=4)
 
         self.disk_usage_canvas = ctk.CTkCanvas(
             tools,
@@ -1246,6 +1252,8 @@ class App(ctk.CTk):
         custom_nodes_text = "\n".join(f"- {node}" for node in custom_nodes) if custom_nodes else "- None found"
         triton_status = "installed" if self._is_triton_installed(instance) else "not installed"
         ultralytics_status = "installed" if self._is_ultralytics_installed(instance) else "not installed"
+        sage_attention_status = "installed" if self._is_sage_attention_installed(instance) else "not installed"
+        flash_attention_status = "installed" if self._is_flash_attention_installed(instance) else "not installed"
         self._set_detail_text(
             f"Status: {status}\n"
             f"Created/registered: {created}\n"
@@ -1253,6 +1261,8 @@ class App(ctk.CTk):
             f"Backup: {backup_text}\n"
             f"Triton: {triton_status}\n"
             f"Ultralytics: {ultralytics_status}\n"
+            f"Sage Attention: {sage_attention_status}\n"
+            f"Flash Attention: {flash_attention_status}\n"
             f"Common model folder: {common_label}\n\n"
             f"Custom nodes:\n{custom_nodes_text}\n\n"
             f"Common model paths:\n{common_text}\n\n"
@@ -1692,10 +1702,11 @@ class App(ctk.CTk):
         if hasattr(self, "disconnect_yaml_button"):
             active_yaml = self._resolve_comfy_root(Path(instance.path)) / "extra_model_paths.yaml"
             self.disconnect_yaml_button.configure(state="normal" if active_yaml.exists() else "disabled")
-        if hasattr(self, "install_triton_button"):
-            self.install_triton_button.configure(state="disabled" if self._is_triton_installed(instance) else "normal")
-        if hasattr(self, "install_ultralytics_button"):
-            self.install_ultralytics_button.configure(state="disabled" if self._is_ultralytics_installed(instance) else "normal")
+        if hasattr(self, "library_panel_button"):
+            self.library_panel_button.configure(state="normal")
+        if hasattr(self, "embedded_python_cmd_button"):
+            python_path = self._embedded_python_path(instance)
+            self.embedded_python_cmd_button.configure(state="normal" if python_path.exists() else "disabled")
 
     def _instance_backup_summary(self, instance: ComfyInstance) -> dict[str, object]:
         if not self.backup_infos:
@@ -1767,6 +1778,27 @@ class App(ctk.CTk):
         markers = [
             site_packages / "ultralytics",
             *site_packages.glob("ultralytics*.dist-info"),
+        ]
+        return any(path.exists() for path in markers)
+
+    def _is_sage_attention_installed(self, instance: ComfyInstance) -> bool:
+        site_packages = Path(instance.path) / "python_embeded" / "Lib" / "site-packages"
+        if not site_packages.exists():
+            return False
+        markers = [
+            site_packages / "sageattention",
+            *site_packages.glob("sageattention*.dist-info"),
+        ]
+        return any(path.exists() for path in markers)
+
+    def _is_flash_attention_installed(self, instance: ComfyInstance) -> bool:
+        site_packages = Path(instance.path) / "python_embeded" / "Lib" / "site-packages"
+        if not site_packages.exists():
+            return False
+        markers = [
+            site_packages / "flash_attn",
+            *site_packages.glob("flash_attn*.dist-info"),
+            *site_packages.glob("flash_attn*.egg-info"),
         ]
         return any(path.exists() for path in markers)
 
@@ -2824,37 +2856,72 @@ class App(ctk.CTk):
                 self.comfyui_manager_button.configure(state="normal")
             self._show_alert("Install Failed", f"Could not install ComfyUI Manager: {error}", "error")
 
-    def _install_triton(self) -> None:
-        if self.selected_instance is None:
+    def _install_triton(self, instance: ComfyInstance | None = None) -> None:
+        target = instance or self.selected_instance
+        if target is None:
             self._show_alert("No Instance Selected", "Select an instance first.", "info")
             return
-        instance = self.selected_instance
-        if self._is_triton_installed(instance):
-            self._show_alert("Triton Installed", "Triton is already installed in this instance.", "info")
+        self._install_instance_library(
+            instance=target,
+            library_name="Triton",
+            package_name="triton-windows",
+            is_installed=self._is_triton_installed,
+            progress_title="Install Triton",
+            progress_heading="Installing Triton",
+            success_message="Triton is now installed in the instance.",
+        )
+
+    def _install_ultralytics(self, instance: ComfyInstance | None = None) -> None:
+        target = instance or self.selected_instance
+        if target is None:
+            self._show_alert("No Instance Selected", "Select an instance first.", "info")
             return
+        self._install_instance_library(
+            instance=target,
+            library_name="Ultralytics",
+            package_name="ultralytics",
+            is_installed=self._is_ultralytics_installed,
+            progress_title="Install Ultralytics",
+            progress_heading="Installing Ultralytics",
+            success_message="Ultralytics is now installed in the instance.",
+        )
+
+    def _install_instance_library(
+        self,
+        instance: ComfyInstance,
+        library_name: str,
+        package_name: str,
+        is_installed,
+        progress_title: str,
+        progress_heading: str,
+        success_message: str,
+    ) -> None:
+        already_installed = bool(is_installed(instance))
+        action = "Re-install" if already_installed else "Install"
         python_path = self._embedded_python_path(instance)
         if not python_path.exists():
             self._show_alert("Embedded Python Missing", "This instance does not contain python_embeded\\python.exe.", "error")
             return
         if not self._ask_confirm(
-            "Install Triton",
-            "This will install triton-windows using the selected instance embedded Python. Continue?",
+            f"{action} {library_name}",
+            f"This will {action.lower()} {library_name} using the selected instance embedded Python. Continue?",
         ):
             return
         progress = self._open_manager_progress_dialog(
-            "Preparing Triton installation...",
-            title="Install Triton",
-            heading="Installing Triton",
+            f"Preparing {library_name} installation...",
+            title=progress_title,
+            heading=progress_heading,
         )
-        if hasattr(self, "install_triton_button"):
-            self.install_triton_button.configure(state="disabled")
 
         def worker() -> None:
             try:
                 self._assert_inside_work_folder(python_path)
                 self.after(0, lambda: self._update_manager_progress(progress, 0.25, "Running pip inside the instance..."))
+                command = [str(python_path), "-m", "pip", "install", package_name]
+                if already_installed:
+                    command.extend(["--upgrade", "--force-reinstall"])
                 result = subprocess.run(
-                    [str(python_path), "-m", "pip", "install", "triton-windows"],
+                    command,
                     cwd=str(Path(instance.path)),
                     capture_output=True,
                     text=True,
@@ -2864,95 +2931,553 @@ class App(ctk.CTk):
                 if result.returncode != 0:
                     detail = (result.stderr or result.stdout or "").strip()
                     raise RuntimeError(detail or "pip install failed.")
-                if not self._is_triton_installed(instance):
-                    raise RuntimeError("pip completed, but Triton was not found in site-packages.")
-                self.after(0, lambda: self._update_manager_progress(progress, 1.0, "Triton installation completed."))
+                if not is_installed(instance):
+                    raise RuntimeError(f"pip completed, but {library_name} was not found in site-packages.")
+                self.after(0, lambda: self._update_manager_progress(progress, 1.0, f"{library_name} installation completed."))
             except Exception as exc:
                 error = str(exc)
-                self.after(0, lambda message=error: self._finish_triton_install(progress, False, message))
+                self.after(0, lambda message=error: self._finish_instance_library_install(progress, False, message, library_name, success_message))
                 return
-            self.after(0, lambda: self._finish_triton_install(progress, True, ""))
+            self.after(0, lambda: self._finish_instance_library_install(progress, True, "", library_name, success_message))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_triton_install(self, progress: dict[str, object], success: bool, error: str) -> None:
+    def _finish_instance_library_install(
+        self,
+        progress: dict[str, object],
+        success: bool,
+        error: str,
+        library_name: str,
+        success_message: str,
+    ) -> None:
         dialog = progress.get("dialog")
         if isinstance(dialog, ctk.CTkToplevel) and dialog.winfo_exists():
             dialog.destroy()
         if self.selected_instance is not None:
             self._refresh_instance_action_fields(self.selected_instance)
             self._select_instance(self.selected_instance)
+            self._refresh_library_panel_buttons()
         if success:
-            self._show_alert("Triton Installed", "Triton is now installed in the instance.", "info")
+            self._show_alert(f"{library_name} Installed", success_message, "info")
         else:
-            if hasattr(self, "install_triton_button") and self.selected_instance is not None:
-                self.install_triton_button.configure(state="disabled" if self._is_triton_installed(self.selected_instance) else "normal")
-            self._show_alert("Triton Install Failed", f"Could not install Triton: {error}", "error")
+            subtitle = "No Compatible Version Found" if self._is_no_compatible_wheel_error(error) else ""
+            self._show_alert(
+                f"{library_name} Install Failed",
+                f"Could not install {library_name}: {error}",
+                "error",
+                subtitle=subtitle,
+            )
 
-    def _install_ultralytics(self) -> None:
-        if self.selected_instance is None:
+    @staticmethod
+    def _is_no_compatible_wheel_error(error: str) -> bool:
+        lowered = error.lower()
+        return "no exact compatible wheel found" in lowered or "no compatible wheel found" in lowered
+
+    def _install_sage_attention(self, instance: ComfyInstance | None = None) -> None:
+        target = instance or self.selected_instance
+        if target is None:
             self._show_alert("No Instance Selected", "Select an instance first.", "info")
             return
-        instance = self.selected_instance
-        if self._is_ultralytics_installed(instance):
-            self._show_alert("Ultralytics Installed", "Ultralytics is already installed in this instance.", "info")
+        self._install_matched_wheel_library(
+            instance=target,
+            library_name="Sage Attention",
+            import_name="sageattention",
+            project_names=["sageattention"],
+            is_installed=self._is_sage_attention_installed,
+        )
+
+    def _install_flash_attention(self, instance: ComfyInstance | None = None) -> None:
+        target = instance or self.selected_instance
+        if target is None:
+            self._show_alert("No Instance Selected", "Select an instance first.", "info")
             return
+        self._install_matched_wheel_library(
+            instance=target,
+            library_name="Flash Attention",
+            import_name="flash_attn",
+            project_names=["flash-attn", "flash_attn"],
+            is_installed=self._is_flash_attention_installed,
+        )
+
+    def _install_matched_wheel_library(
+        self,
+        instance: ComfyInstance,
+        library_name: str,
+        import_name: str,
+        project_names: list[str],
+        is_installed,
+    ) -> None:
+        already_installed = bool(is_installed(instance))
+        action = "Re-install" if already_installed else "Install"
         python_path = self._embedded_python_path(instance)
         if not python_path.exists():
             self._show_alert("Embedded Python Missing", "This instance does not contain python_embeded\\python.exe.", "error")
             return
         if not self._ask_confirm(
-            "Install Ultralytics",
-            "This will install ultralytics using the selected instance embedded Python. Continue?",
+            f"{action} {library_name}",
+            (
+                f"This will detect the selected instance Python, Torch, CUDA and Windows tags, "
+                f"then install {library_name} only if an exact compatible wheel is found. Continue?"
+            ),
         ):
             return
         progress = self._open_manager_progress_dialog(
-            "Preparing Ultralytics installation...",
-            title="Install Ultralytics",
-            heading="Installing Ultralytics",
+            f"Preparing {library_name} wheel matching...",
+            title=f"{action} {library_name}",
+            heading=f"{action} {library_name}",
         )
-        if hasattr(self, "install_ultralytics_button"):
-            self.install_ultralytics_button.configure(state="disabled")
+
+        def progress_update(value: float, label: str) -> None:
+            self.after(0, lambda current=value, text=label: self._update_manager_progress(progress, current, text))
 
         def worker() -> None:
+            wheel_path: Path | None = None
             try:
                 self._assert_inside_work_folder(python_path)
-                self.after(0, lambda: self._update_manager_progress(progress, 0.25, "Running pip inside the instance..."))
+                progress_update(0.08, "Detecting instance environment...")
+                environment = self._detect_instance_wheel_environment(instance)
+                progress_update(
+                    0.2,
+                    (
+                        f"Detected {environment['python_tag']} / torch {environment['torch_version']} / "
+                        f"{environment['cuda_tag']} / {environment['platform_tag']}"
+                    ),
+                )
+                progress_update(0.28, "Searching for an exact compatible wheel...")
+                wheel_url, wheel_name = self._find_exact_attention_wheel(project_names, environment)
+                wheel_dir = LOCAL_TEMP_DIR / "library_wheels" / (self._safe_folder_name(instance.name) or "instance")
+                wheel_dir.mkdir(parents=True, exist_ok=True)
+                wheel_path = wheel_dir / wheel_name
+                progress_update(0.42, f"Downloading exact wheel: {wheel_name}")
+                self._download_tool(wheel_url, wheel_path, 0.42, 0.72, progress_update, f"Downloading {library_name} wheel")
+                progress_update(0.76, "Installing local wheel without dependency changes...")
                 result = subprocess.run(
-                    [str(python_path), "-m", "pip", "install", "ultralytics"],
+                    [
+                        str(python_path),
+                        "-m",
+                        "pip",
+                        "install",
+                        "--force-reinstall",
+                        "--no-deps",
+                        "--no-index",
+                        str(wheel_path),
+                    ],
                     cwd=str(Path(instance.path)),
                     capture_output=True,
                     text=True,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
                 )
-                self.after(0, lambda: self._update_manager_progress(progress, 0.85, "Checking installation..."))
                 if result.returncode != 0:
                     detail = (result.stderr or result.stdout or "").strip()
-                    raise RuntimeError(detail or "pip install failed.")
-                if not self._is_ultralytics_installed(instance):
-                    raise RuntimeError("pip completed, but Ultralytics was not found in site-packages.")
-                self.after(0, lambda: self._update_manager_progress(progress, 1.0, "Ultralytics installation completed."))
+                    raise RuntimeError(detail or "pip wheel install failed.")
+                progress_update(0.92, "Checking installation...")
+                checked_environment = self._detect_instance_wheel_environment(instance)
+                for key in ("torch_version", "cuda_tag", "python_tag", "platform_tag"):
+                    if checked_environment.get(key) != environment.get(key):
+                        raise RuntimeError(
+                            f"The instance environment changed during installation "
+                            f"({key}: {environment.get(key)} -> {checked_environment.get(key)})."
+                        )
+                if not is_installed(instance):
+                    raise RuntimeError(f"pip completed, but {library_name} was not found in site-packages.")
+                progress_update(1.0, f"{library_name} installation completed.")
             except Exception as exc:
                 error = str(exc)
-                self.after(0, lambda message=error: self._finish_ultralytics_install(progress, False, message))
+                self.after(0, lambda message=error: self._finish_instance_library_install(
+                    progress,
+                    False,
+                    message,
+                    library_name,
+                    f"{library_name} is now installed in the instance.",
+                ))
                 return
-            self.after(0, lambda: self._finish_ultralytics_install(progress, True, ""))
+            finally:
+                if wheel_path is not None:
+                    try:
+                        wheel_path.unlink()
+                    except OSError:
+                        pass
+            self.after(0, lambda: self._finish_instance_library_install(
+                progress,
+                True,
+                "",
+                library_name,
+                f"{library_name} is now installed in the instance.",
+            ))
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _finish_ultralytics_install(self, progress: dict[str, object], success: bool, error: str) -> None:
-        dialog = progress.get("dialog")
-        if isinstance(dialog, ctk.CTkToplevel) and dialog.winfo_exists():
-            dialog.destroy()
-        if self.selected_instance is not None:
-            self._refresh_instance_action_fields(self.selected_instance)
-            self._select_instance(self.selected_instance)
-        if success:
-            self._show_alert("Ultralytics Installed", "Ultralytics is now installed in the instance.", "info")
+    def _detect_instance_wheel_environment(self, instance: ComfyInstance) -> dict[str, str]:
+        python_path = self._embedded_python_path(instance)
+        code = (
+            "import json, platform, re, sys, sysconfig\n"
+            "from importlib import metadata\n"
+            "from pathlib import Path\n"
+            "\n"
+            "def cuda_tag_from_text(value):\n"
+            "    match = re.search(r'cu(\\d{3})', str(value or '').lower())\n"
+            "    return f'cu{match.group(1)}' if match else ''\n"
+            "\n"
+            "def cuda_tag_from_compiled_version(value):\n"
+            "    try:\n"
+            "        number = int(value)\n"
+            "    except Exception:\n"
+            "        return ''\n"
+            "    if number <= 0:\n"
+            "        return ''\n"
+            "    major = number // 1000\n"
+            "    minor = (number % 1000) // 10\n"
+            "    return f'cu{major}{minor}' if major and minor >= 0 else ''\n"
+            "\n"
+            "info = {\n"
+            "    'python_tag': f'cp{sys.version_info.major}{sys.version_info.minor}',\n"
+            "    'platform_tag': 'win_amd64' if platform.machine().lower() in {'amd64', 'x86_64'} else platform.machine().lower(),\n"
+            "}\n"
+            "try:\n"
+            "    import torch\n"
+            "    torch_full_version = str(torch.__version__)\n"
+            "    info['torch_version'] = torch_full_version.split('+', 1)[0]\n"
+            "    cuda = str(torch.version.cuda or '')\n"
+            "    cuda_candidates = []\n"
+            "    if cuda:\n"
+            "        cuda_candidates.append('cu' + cuda.replace('.', ''))\n"
+            "    cuda_candidates.append(cuda_tag_from_text(torch_full_version))\n"
+            "    for dist_name in ('torch',):\n"
+            "        try:\n"
+            "            cuda_candidates.append(cuda_tag_from_text(metadata.version(dist_name)))\n"
+            "        except metadata.PackageNotFoundError:\n"
+            "            pass\n"
+            "    site_paths = [sysconfig.get_paths().get('purelib'), sysconfig.get_paths().get('platlib')]\n"
+            "    for site_path in {path for path in site_paths if path}:\n"
+            "        root = Path(site_path)\n"
+            "        if not root.exists():\n"
+            "            continue\n"
+            "        for item in root.iterdir():\n"
+            "            item_name = item.name.lower()\n"
+            "            if not item_name.startswith('torch'):\n"
+            "                continue\n"
+            "            cuda_candidates.append(cuda_tag_from_text(item.name))\n"
+            "            if item.is_dir() and item_name.endswith(('.dist-info', '.egg-info')):\n"
+            "                for metadata_name in ('METADATA', 'direct_url.json', 'WHEEL'):\n"
+            "                    metadata_path = item / metadata_name\n"
+            "                    if metadata_path.exists():\n"
+            "                        try:\n"
+            "                            cuda_candidates.append(cuda_tag_from_text(metadata_path.read_text(errors='ignore')[:12000]))\n"
+            "                        except Exception:\n"
+            "                            pass\n"
+            "    for method_name in ('_cuda_getCompiledVersion', '_cuda_getRuntimeVersion'):\n"
+            "        method = getattr(torch._C, method_name, None)\n"
+            "        if callable(method):\n"
+            "            try:\n"
+            "                cuda_candidates.append(cuda_tag_from_compiled_version(method()))\n"
+            "            except Exception:\n"
+            "                pass\n"
+            "    info['cuda_tag'] = next((tag for tag in cuda_candidates if tag), '')\n"
+            "    abi = getattr(torch._C, '_GLIBCXX_USE_CXX11_ABI', None)\n"
+            "    info['cxx11abi'] = '' if abi is None else ('TRUE' if bool(abi) else 'FALSE')\n"
+            "except Exception as exc:\n"
+            "    info['error'] = str(exc)\n"
+            "print(json.dumps(info))\n"
+        )
+        result = subprocess.run(
+            [str(python_path), "-c", code],
+            cwd=str(Path(instance.path)),
+            capture_output=True,
+            text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(f"Could not detect the instance Python/Torch environment: {detail}")
+        try:
+            info = json.loads(result.stdout.strip().splitlines()[-1])
+        except (json.JSONDecodeError, IndexError) as exc:
+            raise RuntimeError("Could not parse the instance environment detection output.") from exc
+        if info.get("error"):
+            raise RuntimeError(f"Could not import torch from the instance embedded Python: {info['error']}")
+        required = ("python_tag", "torch_version", "cuda_tag", "platform_tag")
+        missing = [key for key in required if not str(info.get(key, "")).strip()]
+        if missing:
+            detected = (
+                f"python={info.get('python_tag', 'unknown')}, "
+                f"torch={info.get('torch_version', 'unknown')}, "
+                f"cuda={info.get('cuda_tag', 'missing')}, "
+                f"platform={info.get('platform_tag', 'unknown')}"
+            )
+            extra = ""
+            if "cuda_tag" in missing:
+                extra = (
+                    " The selected instance PyTorch installation does not expose a CUDA tag, "
+                    "so an exact CUDA wheel cannot be selected safely."
+                )
+            raise RuntimeError(f"Missing required compatibility tags: {', '.join(missing)}. Detected: {detected}.{extra}")
+        return {key: str(value) for key, value in info.items()}
+
+    def _find_exact_attention_wheel(self, project_names: list[str], environment: dict[str, str]) -> tuple[str, str]:
+        candidates: list[tuple[str, str]] = []
+        errors: list[str] = []
+        try:
+            candidates.extend(self._wheel_links_from_wildminder_catalog())
+        except Exception as exc:
+            errors.append(f"{WILDMINDER_WHEELS_JSON_URL}: {exc}")
+        for base_url in COMFY_WHEEL_INDEX_BASES:
+            for project_name in project_names:
+                index_url = urllib.parse.urljoin(base_url, f"{project_name}/")
+                try:
+                    candidates.extend(self._wheel_links_from_index(index_url))
+                except Exception as exc:
+                    errors.append(f"{index_url}: {exc}")
+        candidates = self._dedupe_wheel_candidates(candidates)
+        matches = [
+            (url, name)
+            for url, name in candidates
+            if self._wheel_matches_environment(name, project_names, environment)
+        ]
+        if not matches:
+            detected = (
+                f"{environment.get('python_tag')} / torch {environment.get('torch_version')} / "
+                f"{environment.get('cuda_tag')} / {environment.get('platform_tag')}"
+            )
+            details = "\n".join(errors[:4])
+            if details:
+                details = f"\n\nIndex errors:\n{details}"
+            raise RuntimeError(
+                f"No exact compatible wheel found for {detected}. "
+                f"Searched Wildminder AI-windows-whl and Comfy-Org wheel indexes. Nothing was installed.{details}"
+            )
+        matches.sort(key=lambda item: item[1].lower(), reverse=True)
+        return matches[0]
+
+    def _wheel_links_from_wildminder_catalog(self) -> list[tuple[str, str]]:
+        request = urllib.request.Request(WILDMINDER_WHEELS_JSON_URL, headers={"User-Agent": APP_NAME})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            status = getattr(response, "status", 200)
+            if status >= 400:
+                raise RuntimeError(f"HTTP {status}")
+            catalog = json.loads(response.read().decode("utf-8", errors="ignore"))
+        links: list[tuple[str, str]] = []
+
+        def collect(value) -> None:
+            if isinstance(value, dict):
+                for item in value.values():
+                    collect(item)
+                return
+            if isinstance(value, list):
+                for item in value:
+                    collect(item)
+                return
+            if not isinstance(value, str):
+                return
+            text = value.strip()
+            if ".whl" not in text.lower():
+                return
+            if not re.match(r"^https?://", text, flags=re.IGNORECASE):
+                return
+            wheel_url = self._normalize_wheel_download_url(text)
+            wheel_name = self._wheel_name_from_url(wheel_url)
+            if wheel_name.lower().endswith(".whl"):
+                links.append((wheel_url, wheel_name))
+
+        collect(catalog)
+        return links
+
+    def _wheel_links_from_index(self, index_url: str) -> list[tuple[str, str]]:
+        request = urllib.request.Request(index_url, headers={"User-Agent": APP_NAME})
+        with urllib.request.urlopen(request, timeout=30) as response:
+            status = getattr(response, "status", 200)
+            if status >= 400:
+                raise RuntimeError(f"HTTP {status}")
+            html = response.read().decode("utf-8", errors="ignore")
+        links: list[tuple[str, str]] = []
+        for href in re.findall(r'href=[\"\']([^\"\']+\.whl(?:#[^\"\']*)?)[\"\']', html, flags=re.IGNORECASE):
+            clean_href = href.split("#", 1)[0]
+            url = self._normalize_wheel_download_url(urllib.parse.urljoin(index_url, clean_href))
+            name = self._wheel_name_from_url(url)
+            if name.lower().endswith(".whl"):
+                links.append((url, name))
+        return links
+
+    @staticmethod
+    def _dedupe_wheel_candidates(candidates: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        seen: set[tuple[str, str]] = set()
+        unique: list[tuple[str, str]] = []
+        for url, name in candidates:
+            key = (url.lower(), name.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append((url, name))
+        return unique
+
+    @staticmethod
+    def _normalize_wheel_download_url(url: str) -> str:
+        clean_url = urllib.parse.unquote(url.strip()).split("#", 1)[0]
+        parsed = urllib.parse.urlparse(clean_url)
+        if parsed.netloc.lower() == "huggingface.co" and "/blob/" in parsed.path:
+            path = parsed.path.replace("/blob/", "/resolve/", 1)
+            return urllib.parse.urlunparse(parsed._replace(path=path))
+        if parsed.netloc.lower() == "github.com" and "/blob/" in parsed.path:
+            parts = parsed.path.strip("/").split("/")
+            if len(parts) >= 5:
+                owner, repo, _, branch = parts[:4]
+                file_path = "/".join(parts[4:])
+                return f"https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{file_path}"
+        return clean_url
+
+    @staticmethod
+    def _wheel_name_from_url(url: str) -> str:
+        return urllib.parse.unquote(Path(urllib.parse.urlparse(url.split("#", 1)[0]).path).name)
+
+    @staticmethod
+    def _wheel_matches_environment(name: str, project_names: list[str], environment: dict[str, str]) -> bool:
+        lowered = urllib.parse.unquote(name).lower()
+        normalized_name = lowered.replace("-", "_")
+        normalized_projects = [project.lower().replace("-", "_") for project in project_names]
+        if not any(normalized_name.startswith(project) for project in normalized_projects):
+            return False
+        if not lowered.endswith(".whl"):
+            return False
+        for token in ("python_tag", "cuda_tag", "platform_tag"):
+            value = str(environment.get(token, "")).lower()
+            if value and value not in lowered:
+                return False
+        torch_version = str(environment.get("torch_version", "")).lower()
+        if not torch_version:
+            return False
+        torch_versions = [torch_version]
+        torch_parts = torch_version.split(".")
+        if len(torch_parts) >= 2:
+            torch_versions.append(".".join(torch_parts[:2]))
+        if not any(re.search(rf"torch{re.escape(version)}(?![0-9.])", lowered) for version in torch_versions):
+            return False
+        cxx11abi = str(environment.get("cxx11abi", "")).lower()
+        if "cxx11abi" in lowered and cxx11abi and f"cxx11abi{cxx11abi}" not in lowered:
+            return False
+        return True
+
+    def _open_library_installation_panel(self) -> None:
+        if self.selected_instance is None:
+            self._show_alert("No Instance Selected", "Select an instance first.", "info")
+            return
+        instance = self.selected_instance
+        dialog = self._make_modal(f"Library Installation Panel - {instance.name}", 520, 290)
+        dialog.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            dialog,
+            text="Install or re-install libraries only inside this instance.",
+            text_color=("gray35", "gray72"),
+        ).grid(row=0, column=0, sticky="w", padx=24, pady=(24, 16))
+        self.library_panel_window = dialog
+        self.library_panel_instance_path = instance.path
+        self.library_triton_button = ctk.CTkButton(
+            dialog,
+            text="Install Triton",
+            command=lambda item=instance: self._install_triton(item),
+            height=40,
+        )
+        self.library_triton_button.grid(row=1, column=0, sticky="ew", padx=24, pady=5)
+        self.library_ultralytics_button = ctk.CTkButton(
+            dialog,
+            text="Install Ultralytics",
+            command=lambda item=instance: self._install_ultralytics(item),
+            height=40,
+        )
+        self.library_ultralytics_button.grid(row=2, column=0, sticky="ew", padx=24, pady=5)
+        self.library_sage_attention_button = ctk.CTkButton(
+            dialog,
+            text="Install Sage Attention",
+            command=lambda item=instance: self._install_sage_attention(item),
+            height=40,
+        )
+        self.library_sage_attention_button.grid(row=3, column=0, sticky="ew", padx=24, pady=5)
+        self.library_flash_attention_button = ctk.CTkButton(
+            dialog,
+            text="Install Flash Attention",
+            command=lambda item=instance: self._install_flash_attention(item),
+            height=40,
+        )
+        self.library_flash_attention_button.grid(row=4, column=0, sticky="ew", padx=24, pady=(5, 24))
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        self._refresh_library_panel_buttons()
+
+    def _refresh_library_panel_buttons(self) -> None:
+        if self.selected_instance is None:
+            return
+        if not hasattr(self, "library_panel_window"):
+            return
+        dialog = self.library_panel_window
+        if not isinstance(dialog, ctk.CTkToplevel) or not dialog.winfo_exists():
+            return
+        instance = next(
+            (item for item in self.config.instances if item.path == getattr(self, "library_panel_instance_path", "")),
+            self.selected_instance,
+        )
+        if getattr(self, "library_panel_instance_path", "") != instance.path:
+            return
+        if hasattr(self, "library_triton_button"):
+            self._configure_library_button(self.library_triton_button, "Triton", self._is_triton_installed(instance))
+        if hasattr(self, "library_ultralytics_button"):
+            self._configure_library_button(self.library_ultralytics_button, "Ultralytics", self._is_ultralytics_installed(instance))
+        if hasattr(self, "library_sage_attention_button"):
+            self._configure_library_button(self.library_sage_attention_button, "Sage Attention", self._is_sage_attention_installed(instance))
+        if hasattr(self, "library_flash_attention_button"):
+            self._configure_library_button(self.library_flash_attention_button, "Flash Attention", self._is_flash_attention_installed(instance))
+
+    @staticmethod
+    def _configure_library_button(button: ctk.CTkButton, library_name: str, installed: bool) -> None:
+        if installed:
+            button.configure(
+                text=f"Re-install {library_name}",
+                state="normal",
+                fg_color=("gray62", "gray32"),
+                hover_color=("gray55", "gray40"),
+            )
         else:
-            if hasattr(self, "install_ultralytics_button") and self.selected_instance is not None:
-                self.install_ultralytics_button.configure(state="disabled" if self._is_ultralytics_installed(self.selected_instance) else "normal")
-            self._show_alert("Ultralytics Install Failed", f"Could not install Ultralytics: {error}", "error")
+            button.configure(
+                text=f"Install {library_name}",
+                state="normal",
+                fg_color=("#2563eb", "#3b82f6"),
+                hover_color=("#1d4ed8", "#2563eb"),
+            )
+
+    def _run_embedded_python_cmd(self) -> None:
+        if self.selected_instance is None:
+            self._show_alert("No Instance Selected", "Select an instance first.", "info")
+            return
+        instance = self.selected_instance
+        python_path = self._embedded_python_path(instance)
+        if not python_path.exists():
+            self._show_alert("Embedded Python Missing", "This instance does not contain python_embeded\\python.exe.", "error")
+            return
+        try:
+            self._assert_inside_work_folder(python_path)
+            python_exe = str(python_path)
+            instance_folder = str(Path(instance.path))
+            launcher_path = LOCAL_TEMP_DIR / f"embedded_python_cmd_{self._safe_folder_name(instance.name) or 'instance'}.bat"
+            launcher_path.write_text(
+                "\n".join(
+                    [
+                        "@echo off",
+                        f'title Embedded Python - {instance.name}',
+                        f'cd /d "{instance_folder}"',
+                        f'doskey pyemb="{python_exe}" $*',
+                        f"echo Instance: {instance.name}",
+                        f"echo Embedded Python: {python_exe}",
+                        "echo.",
+                        "echo To use the Instance Embedded Python use the alias 'pyemb' like this: pyemb ^<arguments^>",
+                        "echo Example: pyemb -m pip list",
+                        "echo.",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            subprocess.Popen(
+                ["cmd.exe", "/k", str(launcher_path)],
+                cwd=str(Path(instance.path)),
+                creationflags=subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0,
+            )
+        except Exception as exc:
+            self._show_alert("Embedded Python Cmd Failed", f"Could not open the embedded Python command prompt: {exc}", "error")
 
     def _connect_yaml_to_common_models(self) -> None:
         if self.selected_instance is None:
@@ -3716,8 +4241,8 @@ class App(ctk.CTk):
         y = parent_y + max((parent_height - height) // 2, 0)
         window.geometry(f"{width}x{height}+{x}+{y}")
 
-    def _show_alert(self, title: str, message: str, level: str = "info") -> None:
-        dialog = self._make_modal(title, 460, 220)
+    def _show_alert(self, title: str, message: str, level: str = "info", subtitle: str = "") -> None:
+        dialog = self._make_modal(title, 460, 250 if subtitle else 220)
         dialog.grid_columnconfigure(0, weight=1)
         colors = {
             "info": ("#2563eb", "#3b82f6"),
@@ -3726,10 +4251,16 @@ class App(ctk.CTk):
         }
         accent = colors.get(level, colors["info"])
         ctk.CTkLabel(dialog, text=title, font=ctk.CTkFont(size=20, weight="bold")).grid(
-            row=0, column=0, sticky="w", padx=24, pady=(22, 8)
+            row=0, column=0, sticky="w", padx=24, pady=(22, 2 if subtitle else 8)
         )
+        message_row = 1
+        if subtitle:
+            ctk.CTkLabel(dialog, text=subtitle, font=ctk.CTkFont(size=20, weight="bold")).grid(
+                row=1, column=0, sticky="w", padx=24, pady=(0, 10)
+            )
+            message_row = 2
         ctk.CTkLabel(dialog, text=message, wraplength=400, justify="left", text_color=("gray35", "gray72")).grid(
-            row=1, column=0, sticky="ew", padx=24, pady=(0, 20)
+            row=message_row, column=0, sticky="ew", padx=24, pady=(0, 20)
         )
         ctk.CTkButton(
             dialog,
@@ -3737,7 +4268,7 @@ class App(ctk.CTk):
             command=dialog.destroy,
             fg_color=accent,
             hover_color=accent,
-        ).grid(row=2, column=0, sticky="e", padx=24, pady=(0, 20))
+        ).grid(row=message_row + 1, column=0, sticky="e", padx=24, pady=(0, 20))
         dialog.wait_window()
 
     def _ask_confirm(self, title: str, message: str) -> bool:
